@@ -1,0 +1,10 @@
+# ⚠️ 회원 개인정보 데이터 — 절대 커밋 금지
+*.xlsx
+*.xls
+*.csv
+
+# OS / 편집기 부산물
+.DS_Store
+Thumbs.db
+desktop.ini
+*.tmp
