@@ -3,6 +3,17 @@
 *.xls
 *.csv
 
+# Node / Next.js
+/node_modules
+/.next
+/out
+next-env.d.ts
+*.tsbuildinfo
+
+# 환경 변수 (anon 키는 공개지만, 로컬 오버라이드 파일은 커밋하지 않는다)
+.env.local
+.env*.local
+
 # OS / 편집기 부산물
 .DS_Store
 Thumbs.db

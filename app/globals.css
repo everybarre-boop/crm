@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+/* ======================================================================
+   디자인 토큰 (기존 admin.html 의 :root 변수를 Tailwind v4 테마로 이식)
+   → bg-bg, text-text, border-border, bg-primary 등 유틸리티로 사용.
+   ====================================================================== */
+@theme {
+  --color-bg: #f5f6f8;
+  --color-card: #ffffff;
+  --color-border: #e2e5ea;
+  --color-primary: #4f6ef7;
+  --color-primary-soft: #eef1ff;
+  --color-text: #1f2430;
+  --color-muted: #8a92a6;
+  --color-danger: #e5484d;
+  --color-danger-soft: #fdeaea;
+  --color-success: #17845c;
+  --color-success-soft: #e6f6ef;
+  --color-sidebar: #1f2430;
+  --color-sidebar-muted: #9aa3b8;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", sans-serif;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background: var(--color-bg);
+  color: var(--color-text);
+}
