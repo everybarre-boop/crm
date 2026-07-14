@@ -1,0 +1,178 @@
+{
+  "id": "00000000-0000-0000-0000-000000000000",
+  "prevId": "",
+  "version": "7",
+  "dialect": "postgresql",
+  "tables": {
+    "public.members": {
+      "name": "members",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigint",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "members_id_seq",
+            "increment": "1",
+            "minValue": "1",
+            "maxValue": "9223372036854775807",
+            "startWith": "1",
+            "cache": "1",
+            "cycle": false,
+            "schema": "public"
+          }
+        },
+        "이름": {
+          "name": "이름",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "성별": {
+          "name": "성별",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "등록일": {
+          "name": "등록일",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "생년월일": {
+          "name": "생년월일",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "수강권명": {
+          "name": "수강권명",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "수강권종류": {
+          "name": "수강권종류",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "결제구분": {
+          "name": "결제구분",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "결제금액": {
+          "name": "결제금액",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "결제방법": {
+          "name": "결제방법",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "결제일시": {
+          "name": "결제일시",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "할부개월수": {
+          "name": "할부개월수",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "잔여횟수": {
+          "name": "잔여횟수",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "전체횟수": {
+          "name": "전체횟수",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "예약가능횟수": {
+          "name": "예약가능횟수",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "취소가능횟수": {
+          "name": "취소가능횟수",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "수강권시작일": {
+          "name": "수강권시작일",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "수강권종료일": {
+          "name": "수강권종료일",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "raw": {
+          "name": "raw",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {},
+      "policies": {
+        "admins_full_access": {
+          "name": "admins_full_access",
+          "as": "PERMISSIVE",
+          "for": "ALL",
+          "to": [
+            "authenticated"
+          ],
+          "withCheck": "((auth.jwt() ->> 'email'::text) = ANY (ARRAY['basegolf.official@gmail.com'::text]))",
+          "using": "((auth.jwt() ->> 'email'::text) = ANY (ARRAY['basegolf.official@gmail.com'::text]))"
+        }
+      },
+      "isRLSEnabled": true
+    }
+  },
+  "enums": {},
+  "schemas": {},
+  "sequences": {},
+  "roles": {},
+  "policies": {},
+  "views": {},
+  "_meta": {
+    "schemas": {},
+    "tables": {},
+    "columns": {}
+  },
+  "internal": {
+    "tables": {}
+  }
+}
