@@ -7,6 +7,8 @@ import {
   COLUMNS,
   SEARCH_COLS,
   FILTER_COLS,
+  BRANCHES,
+  BRANCH_SRC_COL,
   USED_COUNT,
   EDITABLE,
   NUM_COLS,
@@ -33,8 +35,9 @@ export default function Members() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // ── 필터: 성별·수강권종류 드롭다운 + 사용횟수(전체−잔여) 범위 ──────────────
+  // ── 필터: 성별·수강권종류·지점 드롭다운 + 사용횟수(전체−잔여) 범위 ──────────
   const [filters, setFilters] = useState<Record<string, string>>({}); // { 성별, 수강권종류 }
+  const [branch, setBranch] = useState('');
   const [usedMin, setUsedMin] = useState('');
   const [usedMax, setUsedMax] = useState('');
   const [options, setOptions] = useState<Record<string, string[]>>({});
@@ -58,6 +61,9 @@ export default function Members() {
       for (const c of FILTER_COLS) {
         if (filters[c]) query = query.eq(c, filters[c]);
       }
+      // 지점 — 수강권명에 "체험권(광교)"처럼 들어있어 부분일치로 거른다.
+      // 값은 BRANCHES 상수라 사용자 입력이 아니고, ilike 패턴은 값이 아니라 우리가 만든다.
+      if (branch) query = query.ilike(BRANCH_SRC_COL, `%${branch}%`);
       // 사용횟수(전체−잔여) 범위 — DB의 used_count 생성 컬럼 기준
       if (usedMin !== '' && !isNaN(Number(usedMin))) query = query.gte(USED_COUNT, Number(usedMin));
       if (usedMax !== '' && !isNaN(Number(usedMax))) query = query.lte(USED_COUNT, Number(usedMax));
@@ -81,7 +87,7 @@ export default function Members() {
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, [q, filters, usedMin, usedMax, sort, dir, page, size]);
+  }, [q, filters, branch, usedMin, usedMax, sort, dir, page, size]);
 
   useEffect(() => {
     load();
@@ -185,6 +191,25 @@ export default function Members() {
         ))}
 
         <label className="flex flex-col gap-1 text-[12px] text-muted">
+          지점
+          <select
+            className="rounded-[10px] border border-border bg-white px-3 py-[9px] text-sm text-text"
+            value={branch}
+            onChange={(e) => {
+              setBranch(e.target.value);
+              setPage(0);
+            }}
+          >
+            <option value="">전체</option>
+            {BRANCHES.map((b) => (
+              <option key={b} value={b}>
+                {b}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="flex flex-col gap-1 text-[12px] text-muted">
           사용횟수(전체−잔여)
           <div className="flex items-center gap-[6px]">
             <input
@@ -219,6 +244,7 @@ export default function Members() {
           className={btn.ghostSm}
           onClick={() => {
             setFilters({});
+            setBranch('');
             setUsedMin('');
             setUsedMax('');
             setSearchInput('');

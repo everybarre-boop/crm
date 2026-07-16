@@ -3,6 +3,13 @@
 *.xls
 *.csv
 
+# ⚠️ PII 가 박힌 1회성 데이터 반영 SQL — 실명·연락처가 들어있어 커밋 금지.
+# (스키마 마이그레이션 SQL 은 PII 가 없으므로 정상 커밋한다.)
+sql/2026-07-16_update_gwanggyo_counts.sql
+
+# Playwright MCP 부산물 — 조작한 페이지 스냅샷이라 회원 PII 가 그대로 담긴다.
+.playwright-mcp/
+
 # Node / Next.js
 /node_modules
 /.next

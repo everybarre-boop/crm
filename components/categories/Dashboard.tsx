@@ -1,7 +1,15 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { fetchAllRows, fmtNum, usedCount, FILTER_COLS, type MemberRecord } from '@/lib/members';
+import {
+  fetchAllRows,
+  fmtNum,
+  usedCount,
+  FILTER_COLS,
+  BRANCHES,
+  matchesBranch,
+  type MemberRecord,
+} from '@/lib/members';
 import { card, spinner } from '@/components/ui/styles';
 
 function countBy(rows: MemberRecord[], col: string): Record<string, number> {
@@ -38,9 +46,10 @@ export default function Dashboard() {
   const [rows, setRows] = useState<MemberRecord[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // 회원 관리와 동일한 필터 (성별·수강권종류 + 사용횟수 범위). 대시보드는 이미 전체 행을
+  // 회원 관리와 동일한 필터 (성별·수강권종류·지점 + 사용횟수 범위). 대시보드는 이미 전체 행을
   // 가져오므로, 필터는 클라이언트에서 적용해 통계를 다시 계산한다.
   const [filters, setFilters] = useState<Record<string, string>>({});
+  const [branch, setBranch] = useState('');
   const [usedMin, setUsedMin] = useState('');
   const [usedMax, setUsedMax] = useState('');
 
@@ -48,7 +57,8 @@ export default function Dashboard() {
     let alive = true;
     (async () => {
       try {
-        const data = await fetchAllRows('이름,생년월일,성별,수강권종류,결제금액,등록일,전체횟수,잔여횟수');
+        // 수강권명은 지점 필터용 (지점이 "체험권(광교)"처럼 이 컬럼 안에 들어있다)
+        const data = await fetchAllRows('이름,생년월일,성별,수강권명,수강권종류,결제금액,등록일,전체횟수,잔여횟수');
         if (alive) setRows(data);
       } catch (err) {
         if (alive) setError((err as Error).message || String(err));
@@ -79,6 +89,7 @@ export default function Dashboard() {
       for (const c of FILTER_COLS) {
         if (filters[c] && ((r[c] as string) || '') !== filters[c]) return false;
       }
+      if (!matchesBranch(r, branch)) return false;
       if (min !== null || max !== null) {
         const u = usedCount(r);
         if (min !== null && u < min) return false;
@@ -98,9 +109,9 @@ export default function Dashboard() {
       byType: countBy(filtered, '수강권종류'),
       byGender: countBy(filtered, '성별'),
     };
-  }, [rows, filters, usedMin, usedMax]);
+  }, [rows, filters, branch, usedMin, usedMax]);
 
-  const filtered = !!(filters['성별'] || filters['수강권종류'] || usedMin !== '' || usedMax !== '');
+  const filtered = !!(filters['성별'] || filters['수강권종류'] || branch || usedMin !== '' || usedMax !== '');
 
   return (
     <>
@@ -131,6 +142,23 @@ export default function Dashboard() {
         ))}
 
         <label className="flex flex-col gap-1 text-[12px] text-muted">
+          지점
+          <select
+            className="rounded-[10px] border border-border bg-white px-3 py-[9px] text-sm text-text"
+            value={branch}
+            disabled={!rows}
+            onChange={(e) => setBranch(e.target.value)}
+          >
+            <option value="">전체</option>
+            {BRANCHES.map((b) => (
+              <option key={b} value={b}>
+                {b}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="flex flex-col gap-1 text-[12px] text-muted">
           사용횟수(전체−잔여)
           <div className="flex items-center gap-[6px]">
             <input
@@ -159,6 +187,7 @@ export default function Dashboard() {
           className="rounded-[10px] border border-border bg-white px-3 py-[9px] text-[13px] font-semibold hover:bg-[#f1f3f7]"
           onClick={() => {
             setFilters({});
+            setBranch('');
             setUsedMin('');
             setUsedMax('');
           }}

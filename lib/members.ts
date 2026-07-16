@@ -30,6 +30,20 @@ export const SEARCH_COLS = ['이름', '연락처', '수강권명', '수강권종
 // 필터 드롭다운으로 노출하는 저(低)카디널리티 컬럼
 export const FILTER_COLS = ['성별', '수강권종류'] as const;
 
+/* ----------------------------------------------------------------------
+   지점 — 별도 컬럼이 아니라 수강권명 안에 들어있다. (예: "체험권(광교)")
+   그래서 지점 필터는 수강권명 부분일치로 거른다: 서버는 .ilike, 클라이언트는
+   matchesBranch(). dedup_key 는 이미 수강권명을 포함하므로 지점이 다르면
+   자동으로 별개 행이 되고, 지점을 KEY_COLS 에 따로 넣을 필요가 없다.
+   ---------------------------------------------------------------------- */
+export const BRANCHES = ['청담', '옥수', '광교', '반포', '판교', '송파'] as const;
+export const BRANCH_SRC_COL = '수강권명';
+
+export function matchesBranch(rec: Record<string, unknown>, branch: string): boolean {
+  if (!branch) return true;
+  return String(rec[BRANCH_SRC_COL] ?? '').includes(branch);
+}
+
 // used_count = 전체횟수 − 잔여횟수 (사용횟수). DB에는 members.used_count 생성 컬럼으로도 존재.
 // 서버 필터는 그 컬럼(.gte/.lte)을, 대시보드 등 클라이언트 계산은 usedCount() 를 쓴다.
 export const USED_COUNT = 'used_count';
