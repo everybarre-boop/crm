@@ -22,8 +22,8 @@ export const members = pgTable(
   'members',
   {
     // bigint identity. maxValue 등은 Postgres 기본값이라 굳이 명시하지 않는다.
-    // (JS number 로는 bigint 최댓값을 정확히 표현 못 해 허위 diff 가 생긴다.)
-    id: bigint({ mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
+    // mode:'bigint' — JS number 는 2^53 초과 정수를 정확히 표현 못 하므로 bigint 로 받는다.
+    id: bigint({ mode: 'bigint' }).primaryKey().generatedAlwaysAsIdentity(),
     이름: text('이름'),
     성별: text('성별'),
     등록일: text('등록일'),
