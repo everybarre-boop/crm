@@ -4,6 +4,7 @@ import { useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { sb } from '@/lib/supabase';
 import { TABLE, COLUMNS, makeKey, type MemberRecord } from '@/lib/members';
+import { SALES_TABLE, toSalesRecord } from '@/lib/sales';
 import { btn, card } from '@/components/ui/styles';
 
 type LogLine = { msg: string; kind: 'ok' | 'err' | 'info' };
@@ -38,15 +39,36 @@ function readRows(f: File): Promise<Record<string, unknown>[]> {
   });
 }
 
+// 한 파일을 대상 테이블에 chunk 단위로 upsert. 반영/합침 행수를 돌려준다.
+async function upsertBatches(
+  table: string,
+  records: MemberRecord[],
+  onProgress: (n: number) => void,
+): Promise<number> {
+  const CHUNK = 500;
+  let saved = 0;
+  for (let i = 0; i < records.length; i += CHUNK) {
+    const batch = records.slice(i, i + CHUNK);
+    const { error } = await sb.from(table).upsert(batch, { onConflict: 'dedup_key' });
+    if (error) throw error;
+    saved += batch.length;
+    onProgress(saved);
+  }
+  return saved;
+}
+
 export default function Upload() {
   const [files, setFiles] = useState<File[]>([]);
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [status, setStatus] = useState('저장할 파일을 먼저 올려주세요.');
   const [saving, setSaving] = useState(false);
   const [drag, setDrag] = useState(false);
+  // 저장 대상: 회원(members) / 매출(sales). 같은 회원 파일에서 컬럼만 나눠 각 테이블로 보낸다.
+  const [toMembers, setToMembers] = useState(true);
+  const [toSales, setToSales] = useState(true);
   const fileInput = useRef<HTMLInputElement>(null);
 
-  // 엑셀 헤더(정규화) → DB 컬럼 매핑
+  // 엑셀 헤더(정규화) → members DB 컬럼 매핑
   const columnMap = useMemo(() => {
     const m: Record<string, string> = {};
     COLUMNS.forEach((c) => (m[norm(c)] = c));
@@ -56,13 +78,13 @@ export default function Upload() {
   function addFiles(list: FileList | null) {
     if (!list) return;
     setFiles((prev) => [...prev, ...Array.from(list)]);
-    setStatus((prev) => prev); // 상태 문구는 아래 렌더에서 files 길이로 갱신
   }
   function removeFile(i: number) {
     setFiles((prev) => prev.filter((_, idx) => idx !== i));
   }
 
-  function toRecord(row: Record<string, unknown>): MemberRecord {
+  // 엑셀 행 → members 레코드 (매핑되는 컬럼만)
+  function toMemberRecord(row: Record<string, unknown>): MemberRecord {
     const rec: MemberRecord = {};
     for (const key in row) {
       const col = columnMap[norm(key)];
@@ -85,55 +107,95 @@ export default function Upload() {
     let totalFail = 0;
 
     for (const f of files) {
+      let rows: Record<string, unknown>[];
       try {
-        const rows = await readRows(f);
-        if (!rows.length) {
-          addLog({ msg: `⏭️ ${f.name} — 데이터 행이 없습니다.`, kind: 'info' });
-          continue;
-        }
-        const rawCount = rows.length;
-        const records = dedupeByKey(rows.map(toRecord));
-        const merged = rawCount - records.length;
-        const CHUNK = 500;
-        let saved = 0;
-        for (let i = 0; i < records.length; i += CHUNK) {
-          const batch = records.slice(i, i + CHUNK);
-          const { error } = await sb.from(TABLE).upsert(batch, { onConflict: 'dedup_key' });
-          if (error) throw error;
-          saved += batch.length;
-          setStatus(`${f.name} 저장 중… ${saved}/${records.length}`);
-        }
-        totalSaved += saved;
-        addLog({
-          msg: `✅ ${f.name} — ${saved}행 반영 완료` + (merged > 0 ? ` (파일 내 중복 ${merged}행 합침)` : ''),
-          kind: 'ok',
-        });
+        rows = await readRows(f);
       } catch (err) {
         totalFail++;
-        addLog({ msg: `❌ ${f.name} — 저장 실패: ${(err as Error).message || String(err)}`, kind: 'err' });
+        addLog({ msg: `❌ ${f.name} — 읽기 실패: ${(err as Error).message || String(err)}`, kind: 'err' });
+        continue;
+      }
+      if (!rows.length) {
+        addLog({ msg: `⏭️ ${f.name} — 데이터 행이 없습니다.`, kind: 'info' });
+        continue;
+      }
+      const rawCount = rows.length;
+
+      // ── 회원(members) 저장 ──────────────────────────────────────────────
+      if (toMembers) {
+        try {
+          const records = dedupeByKey(rows.map(toMemberRecord));
+          const merged = rawCount - records.length;
+          const saved = await upsertBatches(TABLE, records, (n) =>
+            setStatus(`${f.name} · 회원 저장 중… ${n}/${records.length}`),
+          );
+          totalSaved += saved;
+          addLog({
+            msg: `✅ ${f.name} · 회원 — ${saved}행 반영` + (merged > 0 ? ` (파일 내 중복 ${merged}행 합침)` : ''),
+            kind: 'ok',
+          });
+        } catch (err) {
+          totalFail++;
+          addLog({ msg: `❌ ${f.name} · 회원 — 저장 실패: ${(err as Error).message || String(err)}`, kind: 'err' });
+        }
+      }
+
+      // ── 매출(sales) 저장 ────────────────────────────────────────────────
+      if (toSales) {
+        try {
+          const records = dedupeByKey(rows.map(toSalesRecord));
+          const merged = rawCount - records.length;
+          const saved = await upsertBatches(SALES_TABLE, records, (n) =>
+            setStatus(`${f.name} · 매출 저장 중… ${n}/${records.length}`),
+          );
+          totalSaved += saved;
+          addLog({
+            msg: `✅ ${f.name} · 매출 — ${saved}행 반영` + (merged > 0 ? ` (파일 내 중복 ${merged}행 합침)` : ''),
+            kind: 'ok',
+          });
+        } catch (err) {
+          totalFail++;
+          addLog({ msg: `❌ ${f.name} · 매출 — 저장 실패: ${(err as Error).message || String(err)}`, kind: 'err' });
+        }
       }
     }
     setStatus(`완료 — 총 ${totalSaved}행 저장${totalFail ? `, ${totalFail}개 실패` : ''}.`);
     setSaving(false);
   }
 
+  const noTarget = !toMembers && !toSales;
   const readyStatus = saving
     ? status
     : files.length === 0
       ? '저장할 파일을 먼저 올려주세요.'
-      : `${files.length}개 파일 준비됨.`;
+      : noTarget
+        ? '저장 대상(회원/매출)을 하나 이상 선택하세요.'
+        : `${files.length}개 파일 준비됨.`;
 
   return (
     <>
       <div className="mb-[22px]">
         <h2 className="m-0 mb-1 text-[22px]">데이터 업로드</h2>
         <p className="m-0 text-[13px] text-muted">
-          엑셀(.xlsx, .xls) · CSV 를 올리면 <code>members</code> 테이블에 upsert 됩니다. 같은 수강권은 중복 없이
-          갱신됩니다.
+          회원 엑셀(.xlsx, .xls) · CSV 한 장을 올리면 <strong>회원 정보는 <code>members</code></strong>, <strong>결제(매출)
+          정보는 <code>sales</code></strong> 테이블로 나눠 upsert 됩니다. 같은 건은 중복 없이 갱신됩니다.
         </p>
       </div>
 
       <div className={card}>
+        <div className="mb-4 flex flex-wrap items-center gap-4">
+          <span className="text-[13px] font-semibold">저장 대상</span>
+          <label className="flex cursor-pointer items-center gap-2 text-sm">
+            <input type="checkbox" checked={toMembers} onChange={(e) => setToMembers(e.target.checked)} disabled={saving} />
+            회원 데이터 <code className="text-muted">members</code>
+          </label>
+          <label className="flex cursor-pointer items-center gap-2 text-sm">
+            <input type="checkbox" checked={toSales} onChange={(e) => setToSales(e.target.checked)} disabled={saving} />
+            매출 데이터 <code className="text-muted">sales</code>
+          </label>
+          <span className="text-xs text-muted">※ 특정 대상만 저장하려면 체크를 해제하세요.</span>
+        </div>
+
         <label
           className={[
             'block cursor-pointer rounded-xl border-2 border-dashed p-10 text-center transition-colors',
@@ -197,7 +259,11 @@ export default function Upload() {
         </ul>
 
         <div className="mt-4 flex flex-wrap items-center gap-[10px]">
-          <button className={btn.primaryAuto + ' w-auto'} disabled={files.length === 0 || saving} onClick={saveAll}>
+          <button
+            className={btn.primaryAuto + ' w-auto'}
+            disabled={files.length === 0 || saving || noTarget}
+            onClick={saveAll}
+          >
             Supabase에 저장
           </button>
           <span className="text-[13px] text-muted">{readyStatus}</span>

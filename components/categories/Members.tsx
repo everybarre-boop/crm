@@ -6,11 +6,14 @@ import {
   TABLE,
   COLUMNS,
   SEARCH_COLS,
+  FILTER_COLS,
+  USED_COUNT,
   EDITABLE,
   NUM_COLS,
   makeKey,
   fmtNum,
   sanitizeSearchTerm,
+  fetchAllRows,
   type MemberRecord,
 } from '@/lib/members';
 import { useToast } from '@/components/ui/Toast';
@@ -30,6 +33,12 @@ export default function Members() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  // ── 필터: 성별·수강권종류 드롭다운 + 사용횟수(전체−잔여) 범위 ──────────────
+  const [filters, setFilters] = useState<Record<string, string>>({}); // { 성별, 수강권종류 }
+  const [usedMin, setUsedMin] = useState('');
+  const [usedMax, setUsedMax] = useState('');
+  const [options, setOptions] = useState<Record<string, string[]>>({});
+
   const [editRow, setEditRow] = useState<MemberRecord | null>(null);
   const [delRow, setDelRow] = useState<MemberRecord | null>(null);
 
@@ -45,6 +54,13 @@ export default function Members() {
       if (term) {
         query = query.or(SEARCH_COLS.map((c) => `${c}.ilike.%${term}%`).join(','));
       }
+      // 드롭다운 필터 (성별·수강권종류) — 정확 일치(AND)
+      for (const c of FILTER_COLS) {
+        if (filters[c]) query = query.eq(c, filters[c]);
+      }
+      // 사용횟수(전체−잔여) 범위 — DB의 used_count 생성 컬럼 기준
+      if (usedMin !== '' && !isNaN(Number(usedMin))) query = query.gte(USED_COUNT, Number(usedMin));
+      if (usedMax !== '' && !isNaN(Number(usedMax))) query = query.lte(USED_COUNT, Number(usedMax));
       query = query
         .order(sort, { ascending: dir, nullsFirst: false })
         .range(page * size, page * size + size - 1);
@@ -55,16 +71,44 @@ export default function Members() {
       setTotal(count || 0);
     } catch (err) {
       if (seq !== loadSeq.current) return;
-      setLoadError((err as Error).message || String(err));
+      let msg = (err as Error).message || String(err);
+      // used_count 컬럼 미생성 시(마이그레이션 전) 안내를 덧붙인다.
+      if (/used_count/i.test(msg)) {
+        msg += ' — 사용횟수 필터를 쓰려면 sql/2026-07_sales_and_used_count.sql 을 Supabase에서 실행하세요.';
+      }
+      setLoadError(msg);
       setRows([]);
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, [q, sort, dir, page, size]);
+  }, [q, filters, usedMin, usedMax, sort, dir, page, size]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // 필터 드롭다운 옵션: 저카디널리티 컬럼(성별·수강권종류)의 실제 값 목록을 한 번 수집
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const rows = await fetchAllRows(FILTER_COLS.join(','));
+        if (!alive) return;
+        const opt: Record<string, string[]> = {};
+        for (const c of FILTER_COLS) {
+          opt[c] = [...new Set(rows.map((r) => (r[c] as string) || '').filter(Boolean))].sort((a, b) =>
+            a.localeCompare(b, 'ko'),
+          );
+        }
+        setOptions(opt);
+      } catch {
+        /* 옵션 수집 실패는 치명적이지 않다 — 드롭다운만 비게 둔다 */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // 검색어 디바운스 (300ms)
   const [searchInput, setSearchInput] = useState('');
@@ -114,6 +158,75 @@ export default function Members() {
           <option value={50}>50개씩</option>
           <option value={100}>100개씩</option>
         </select>
+      </div>
+
+      {/* 필터 바: 성별·수강권종류 드롭다운 + 사용횟수(전체−잔여) 범위 */}
+      <div className="mb-[14px] flex flex-wrap items-end gap-x-[10px] gap-y-3 rounded-xl border border-border bg-[#f7f8fa] px-[14px] py-3">
+        {FILTER_COLS.map((c) => (
+          <label key={c} className="flex flex-col gap-1 text-[12px] text-muted">
+            {c}
+            <select
+              className="rounded-[10px] border border-border bg-white px-3 py-[9px] text-sm text-text"
+              value={filters[c] ?? ''}
+              onChange={(e) => {
+                const v = e.target.value;
+                setFilters((s) => ({ ...s, [c]: v }));
+                setPage(0);
+              }}
+            >
+              <option value="">전체</option>
+              {(options[c] ?? []).map((v) => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
+            </select>
+          </label>
+        ))}
+
+        <label className="flex flex-col gap-1 text-[12px] text-muted">
+          사용횟수(전체−잔여)
+          <div className="flex items-center gap-[6px]">
+            <input
+              type="number"
+              min={0}
+              inputMode="numeric"
+              className="w-[84px] rounded-[10px] border border-border bg-white px-3 py-[9px] text-sm"
+              placeholder="최소"
+              value={usedMin}
+              onChange={(e) => {
+                setUsedMin(e.target.value);
+                setPage(0);
+              }}
+            />
+            <span className="text-muted">~</span>
+            <input
+              type="number"
+              min={0}
+              inputMode="numeric"
+              className="w-[84px] rounded-[10px] border border-border bg-white px-3 py-[9px] text-sm"
+              placeholder="최대"
+              value={usedMax}
+              onChange={(e) => {
+                setUsedMax(e.target.value);
+                setPage(0);
+              }}
+            />
+          </div>
+        </label>
+
+        <button
+          className={btn.ghostSm}
+          onClick={() => {
+            setFilters({});
+            setUsedMin('');
+            setUsedMax('');
+            setSearchInput('');
+            setPage(0);
+          }}
+        >
+          필터 초기화
+        </button>
       </div>
 
       <div className="overflow-x-auto rounded-xl border border-border">

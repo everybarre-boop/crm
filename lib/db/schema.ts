@@ -15,8 +15,11 @@
       어긋나 있다. 여기서는 "실제 DB" 를 그대로 반영했다(그래야 db:generate 가
       허위 diff 를 만들지 않는다). 이 불일치 해소는 별도 결정 사항이다.
    ====================================================================== */
-import { pgTable, pgPolicy, bigint, text, jsonb, timestamp } from 'drizzle-orm/pg-core';
+import { pgTable, pgPolicy, bigint, integer, text, jsonb, timestamp } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
+
+// 관리자 이메일 화이트리스트 (members·sales 공통 RLS). 유일한 PII 방어선. (CLAUDE.md 참고)
+const adminOnly = sql`((auth.jwt() ->> 'email'::text) = ANY (ARRAY['basegolf.official@gmail.com'::text]))`;
 
 export const members = pgTable(
   'members',
@@ -25,6 +28,7 @@ export const members = pgTable(
     // mode:'bigint' — JS number 는 2^53 초과 정수를 정확히 표현 못 하므로 bigint 로 받는다.
     id: bigint({ mode: 'bigint' }).primaryKey().generatedAlwaysAsIdentity(),
     이름: text('이름'),
+    연락처: text('연락처'),
     성별: text('성별'),
     등록일: text('등록일'),
     생년월일: text('생년월일'),
@@ -41,17 +45,63 @@ export const members = pgTable(
     취소가능횟수: text('취소가능횟수'),
     수강권시작일: text('수강권시작일'),
     수강권종료일: text('수강권종료일'),
+    // 사용횟수 = 전체횟수 − 잔여횟수 (숫자 외 문자는 제거하고 계산). 회원/대시보드의
+    // "사용횟수 범위" 필터가 이 컬럼을 .gte/.lte 로 서버에서 거른다. STORED 생성 컬럼이라
+    // 업로드 upsert 에는 넣지 않는다(넣으면 에러). 표현식은 sql/ 폴더의 마이그레이션과 동일.
+    usedCount: integer('used_count').generatedAlwaysAs(
+      sql`(COALESCE(NULLIF(regexp_replace(COALESCE("전체횟수", ''), '[^0-9-]', '', 'g'), '')::int, 0) - COALESCE(NULLIF(regexp_replace(COALESCE("잔여횟수", ''), '[^0-9-]', '', 'g'), '')::int, 0))`,
+    ),
+    // 중복 판정 키(이름·연락처·수강권명·등록일·전체횟수). 앱의 makeKey(KEY_COLS)가 계산해
+    // 보내고, unique 인덱스가 재업로드 시 덮어쓰기(upsert onConflict:'dedup_key')를 보장한다.
+    // (백필/유니크는 sql/2026-07_dedup_members.sql 로 반영)
+    dedupKey: text('dedup_key').unique(),
     raw: jsonb(),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow(),
   },
   () => [
-    // RLS: 관리자 이메일 화이트리스트(authenticated). 유일한 PII 방어선. (CLAUDE.md 참고)
     pgPolicy('admins_full_access', {
       as: 'permissive',
       for: 'all',
       to: ['authenticated'],
-      using: sql`((auth.jwt() ->> 'email'::text) = ANY (ARRAY['basegolf.official@gmail.com'::text]))`,
-      withCheck: sql`((auth.jwt() ->> 'email'::text) = ANY (ARRAY['basegolf.official@gmail.com'::text]))`,
+      using: adminOnly,
+      withCheck: adminOnly,
+    }),
+  ],
+);
+
+/* ======================================================================
+   sales — 매출(결제) 전용 테이블
+   회원 엑셀에서 결제 컬럼만 분리해 저장한다. dedup_key + 유니크 인덱스로
+   재업로드 시 중복 매출 행을 upsert 로 막는다. (lib/sales.ts 와 컬럼/키 일치)
+   ⚠️ members 와 달리 이 테이블은 처음부터 dedup_key 유니크 제약을 둔다 —
+      onConflict:'dedup_key' upsert 가 정상 동작한다.
+   ====================================================================== */
+export const sales = pgTable(
+  'sales',
+  {
+    id: bigint({ mode: 'bigint' }).primaryKey().generatedAlwaysAsIdentity(),
+    이름: text('이름'),
+    연락처: text('연락처'),
+    생년월일: text('생년월일'),
+    수강권명: text('수강권명'),
+    수강권종류: text('수강권종류'),
+    등록일: text('등록일'),
+    결제구분: text('결제구분'),
+    결제금액: text('결제금액'),
+    결제일시: text('결제일시'),
+    결제방법: text('결제방법'),
+    할부개월수: text('할부개월수'),
+    dedupKey: text('dedup_key').unique(),
+    raw: jsonb(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow(),
+  },
+  () => [
+    pgPolicy('admins_full_access', {
+      as: 'permissive',
+      for: 'all',
+      to: ['authenticated'],
+      using: adminOnly,
+      withCheck: adminOnly,
     }),
   ],
 );
