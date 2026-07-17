@@ -44,6 +44,41 @@ export function matchesBranch(rec: Record<string, unknown>, branch: string): boo
   return String(rec[BRANCH_SRC_COL] ?? '').includes(branch);
 }
 
+/* ----------------------------------------------------------------------
+   수강권 종류 = 수강권명에서 지점 꼬리표를 뗀 이름.
+   (그룹/프라이빗/없음 으로 나누지 않고, 수강권명에 적힌 이름 자체로 종류를 구분한다.)
+   예) "바레 그룹 40회 (광교)"  → "바레 그룹 40회"
+       "얼리버드 바레그룹20회(광교)" → "얼리버드 바레그룹20회"
+       "(광교) instructor course" → "instructor course"
+   지점은 수강권명 안에 "(광교)"처럼 괄호로 들어있으므로, BRANCHES 이름을 담은
+   괄호 구간을 제거하고 공백을 정리한다.
+   ---------------------------------------------------------------------- */
+export function ticketType(수강권명: unknown): string {
+  let s = String(수강권명 ?? '');
+  // 지점명을 포함한 괄호 묶음 제거: (광교), （광교） 등
+  for (const b of BRANCHES) {
+    s = s.replace(new RegExp('[（(][^（()）]*' + b + '[^（()）]*[)）]', 'g'), ' ');
+  }
+  return s.replace(/\s+/g, ' ').trim() || '(없음)';
+}
+
+// 체험 등록건: 수강권명에 "체험"이 들어있으면 체험으로 본다.
+export function isTrial(rec: Record<string, unknown>): boolean {
+  return String(rec[BRANCH_SRC_COL] ?? '').includes('체험');
+}
+
+/* ----------------------------------------------------------------------
+   1인 식별 — 이름 + 연락처(숫자만). 스튜디오메이트 매칭·회원별 집계의 기준.
+   연락처가 '010-1234-5678' 이든 '01012345678' 이든 같은 사람으로 묶인다.
+   ---------------------------------------------------------------------- */
+export function phoneDigits(v: unknown): string {
+  return String(v ?? '').replace(/[^0-9]/g, '');
+}
+
+export function personKey(rec: Record<string, unknown>): string {
+  return String(rec['이름'] ?? '').trim() + KEY_SEP + phoneDigits(rec['연락처']);
+}
+
 // used_count = 전체횟수 − 잔여횟수 (사용횟수). DB에는 members.used_count 생성 컬럼으로도 존재.
 // 서버 필터는 그 컬럼(.gte/.lte)을, 대시보드 등 클라이언트 계산은 usedCount() 를 쓴다.
 export const USED_COUNT = 'used_count';
@@ -86,6 +121,38 @@ export function toInt(v: unknown): number {
 // 사용횟수 = 전체횟수 − 잔여횟수. (대시보드 등 클라이언트 계산용)
 export function usedCount(rec: Record<string, unknown>): number {
   return toInt(rec['전체횟수']) - toInt(rec['잔여횟수']);
+}
+
+/* ----------------------------------------------------------------------
+   텍스트 날짜에서 'YYYY-MM' 추출. 다양한 표기를 관대하게 처리한다:
+   "2026-07-16", "2026. 7. 16.(목)", "2026/7/16 14:30" 모두 → "2026-07".
+   못 뽑으면 '' 반환.
+   ---------------------------------------------------------------------- */
+export function ymKey(dateStr: unknown): string {
+  const m = String(dateStr ?? '').match(/(\d{4})\D+(\d{1,2})/);
+  if (!m) return '';
+  return `${m[1]}-${m[2].padStart(2, '0')}`;
+}
+
+// 텍스트 날짜 → 비교용 정수 yyyymmdd (예: "2026-07-16" → 20260716). 일(day)까지 없으면 null.
+export function ymdNum(dateStr: unknown): number | null {
+  const m = String(dateStr ?? '').match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
+  if (!m) return null;
+  return Number(m[1]) * 10000 + Number(m[2]) * 100 + Number(m[3]);
+}
+
+/* ----------------------------------------------------------------------
+   "지금 사용 가능한 수강권" 판정 = 잔여횟수 > 0 이고, 수강권종료일이 있으면 아직 안 지남.
+   (현재 회원 = 이런 수강권을 하나라도 가진 사람.)
+   ---------------------------------------------------------------------- */
+export function isUsableTicket(rec: Record<string, unknown>, today: Date = new Date()): boolean {
+  if (toInt(rec['잔여횟수']) <= 0) return false;
+  const end = ymdNum(rec['수강권종료일']);
+  if (end !== null) {
+    const todayNum = today.getFullYear() * 10000 + (today.getMonth() + 1) * 100 + today.getDate();
+    if (end < todayNum) return false;
+  }
+  return true;
 }
 
 /* ======================================================================

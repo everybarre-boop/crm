@@ -1,6 +1,8 @@
 import type { ComponentType } from 'react';
 import Dashboard from '@/components/categories/Dashboard';
 import Members from '@/components/categories/Members';
+import MemberSummary from '@/components/categories/MemberSummary';
+import Costs from '@/components/categories/Costs';
 import Upload from '@/components/categories/Upload';
 
 /* ======================================================================
@@ -19,5 +21,7 @@ export type Category = {
 export const CATEGORIES: Category[] = [
   { id: 'dashboard', label: '대시보드', icon: '📊', Component: Dashboard },
   { id: 'members', label: '회원 관리', icon: '👥', Component: Members },
+  { id: 'summary', label: '회원별 집계', icon: '🧾', Component: MemberSummary },
+  { id: 'costs', label: '비용 업로드', icon: '💰', Component: Costs },
   { id: 'upload', label: '데이터 업로드', icon: '⬆️', Component: Upload },
 ];

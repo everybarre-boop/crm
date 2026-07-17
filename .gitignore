@@ -17,9 +17,20 @@ sql/2026-07-16_update_gwanggyo_counts.sql
 next-env.d.ts
 *.tsbuildinfo
 
-# 환경 변수 (anon 키는 공개지만, 로컬 오버라이드 파일은 커밋하지 않는다)
+# 환경 변수 (anon 키는 공개지만, 비밀 담긴 로컬 파일은 커밋하지 않는다)
+.env
 .env.local
 .env*.local
+# automation/.env 등 하위 폴더의 .env 도 모두 차단 (관리자·스튜디오메이트 비밀번호)
+**/.env
+**/.env.local
+
+# 자동화(automation/) 부산물 — 스크랩 결과·미매칭 로그엔 회원 PII 가 담긴다. 커밋 금지.
+automation/*.local.json
+automation/out/
+automation/.auth/
+playwright-report/
+test-results/
 
 # OS / 편집기 부산물
 .DS_Store

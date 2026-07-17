@@ -15,7 +15,7 @@
       어긋나 있다. 여기서는 "실제 DB" 를 그대로 반영했다(그래야 db:generate 가
       허위 diff 를 만들지 않는다). 이 불일치 해소는 별도 결정 사항이다.
    ====================================================================== */
-import { pgTable, pgPolicy, bigint, integer, text, jsonb, timestamp } from 'drizzle-orm/pg-core';
+import { pgTable, pgPolicy, bigint, integer, text, jsonb, timestamp, unique } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 // 관리자 이메일 화이트리스트 (members·sales 공통 RLS). 유일한 PII 방어선. (CLAUDE.md 참고)
@@ -59,6 +59,36 @@ export const members = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow(),
   },
   () => [
+    pgPolicy('admins_full_access', {
+      as: 'permissive',
+      for: 'all',
+      to: ['authenticated'],
+      using: adminOnly,
+      withCheck: adminOnly,
+    }),
+  ],
+);
+
+/* ======================================================================
+   branch_costs — 지점별·월별 비용 (대시보드 비용/인건비율/임대료율 계산용)
+   매출은 sales 에서 자동 집계, 비용은 관리자가 이 테이블에 월별로 입력한다.
+   (sql/2026-07_branch_costs.sql 와 짝. unique(지점,연월) 로 upsert.)
+   ====================================================================== */
+export const branchCosts = pgTable(
+  'branch_costs',
+  {
+    id: bigint({ mode: 'bigint' }).primaryKey().generatedAlwaysAsIdentity(),
+    지점: text('지점').notNull(),
+    연월: text('연월').notNull(), // 'YYYY-MM'
+    인건비: integer('인건비').notNull().default(0),
+    임대료: integer('임대료').notNull().default(0),
+    기타비용: integer('기타비용').notNull().default(0),
+    메모: text('메모'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow(),
+  },
+  (t) => [
+    unique().on(t.지점, t.연월),
     pgPolicy('admins_full_access', {
       as: 'permissive',
       for: 'all',
