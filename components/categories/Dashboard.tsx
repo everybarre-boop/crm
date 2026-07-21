@@ -13,7 +13,9 @@ import {
   type MemberRecord,
 } from '@/lib/members';
 import { SALES_TABLE } from '@/lib/sales';
-import { COSTS_TABLE, currentYearMonth, recentMonths, type BranchCost } from '@/lib/costs';
+import { COSTS_TABLE, type BranchCost } from '@/lib/costs';
+import { defaultPeriod, inPeriod, periodLabel, type Period } from '@/lib/period';
+import PeriodPicker from '@/components/ui/PeriodPicker';
 import { sb } from '@/lib/supabase';
 import { card, spinner } from '@/components/ui/styles';
 
@@ -74,23 +76,28 @@ export default function Dashboard() {
   const [costs, setCosts] = useState<BranchCost[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  const [month, setMonth] = useState(currentYearMonth());
+  const [period, setPeriod] = useState<Period>(defaultPeriod());
   const [chartBranch, setChartBranch] = useState('');
 
-  // members·sales 는 한 번만, costs 는 월이 바뀔 때마다.
+  // members·sales·costs 를 한 번씩 모두 읽어 두고(비용 테이블은 작다) 기간 필터는 클라이언트에서.
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const [m, s] = await Promise.all([
+        const [m, s, c] = await Promise.all([
           fetchAllRows('이름,연락처,성별,수강권명,수강권종류,등록일,전체횟수,잔여횟수'),
           fetchAllRows('이름,연락처,수강권명,결제금액,결제일시', 50000, SALES_TABLE).catch(
             () => [] as MemberRecord[],
           ),
+          (async () => {
+            const { data } = await sb.from(COSTS_TABLE).select('*');
+            return (data as BranchCost[]) || [];
+          })().catch(() => [] as BranchCost[]),
         ]);
         if (!alive) return;
         setMembers(m);
         setSales(s);
+        setCosts(c);
       } catch (err) {
         if (alive) setError((err as Error).message || String(err));
       }
@@ -100,41 +107,51 @@ export default function Dashboard() {
     };
   }, []);
 
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      const { data } = await sb.from(COSTS_TABLE).select('*').eq('연월', month);
-      if (alive) setCosts((data as BranchCost[]) || []);
-    })();
-    return () => {
-      alive = false;
+  // 선택 기간에 포함되는 연도 목록(데이터 기준, 없으면 PeriodPicker 기본값)
+  const years = useMemo(() => {
+    const set = new Set<number>();
+    const add = (v: unknown) => {
+      const mt = /^(\d{4})/.exec(String(v ?? ''));
+      if (mt) set.add(Number(mt[1]));
     };
-  }, [month]);
+    members?.forEach((r) => add(r['등록일']));
+    sales.forEach((r) => add(r['결제일시']));
+    costs.forEach((c) => add(c.연월));
+    return Array.from(set).sort((a, b) => b - a);
+  }, [members, sales, costs]);
 
   // 지점별 지표
   const branchStats = useMemo<BranchStat[] | null>(() => {
     if (!members) return null;
-    const costOf = (b: string) => costs.find((c) => c.지점 === b);
     return BRANCHES.map((b) => {
       const inBranch = members.filter((r) => matchesBranch(r, b));
-      const monthRegs = inBranch.filter((r) => ymKey(r['등록일']) === month);
+      const periodRegs = inBranch.filter((r) => inPeriod(ymKey(r['등록일']), period));
       const persons = new Set(inBranch.map((r) => personKey(r)));
       const rev = sales
-        .filter((r) => matchesBranch(r, b) && ymKey(r['결제일시']) === month)
+        .filter((r) => matchesBranch(r, b) && inPeriod(ymKey(r['결제일시']), period))
         .reduce((s, r) => s + money(r['결제금액']), 0);
-      const c = costOf(b);
+      const c = costs
+        .filter((c) => c.지점 === b && inPeriod(c.연월, period))
+        .reduce(
+          (a, r) => ({
+            인건비: a.인건비 + (r.인건비 || 0),
+            임대료: a.임대료 + (r.임대료 || 0),
+            기타비용: a.기타비용 + (r.기타비용 || 0),
+          }),
+          { 인건비: 0, 임대료: 0, 기타비용: 0 },
+        );
       return {
         지점: b,
-        체험: monthRegs.filter((r) => isTrial(r)).length,
-        신규: monthRegs.filter((r) => !isTrial(r)).length,
+        체험: periodRegs.filter((r) => isTrial(r)).length,
+        신규: periodRegs.filter((r) => !isTrial(r)).length,
         총회원: persons.size,
         매출: rev,
-        인건비: c?.인건비 ?? 0,
-        임대료: c?.임대료 ?? 0,
-        기타비용: c?.기타비용 ?? 0,
+        인건비: c.인건비,
+        임대료: c.임대료,
+        기타비용: c.기타비용,
       };
     });
-  }, [members, sales, costs, month]);
+  }, [members, sales, costs, period]);
 
   const totalRow = useMemo(() => {
     if (!branchStats) return null;
@@ -169,24 +186,11 @@ export default function Dashboard() {
         <p className="m-0 text-[13px] text-muted">지점별 월간 운영 지표 · 매출 대비 비용 비율.</p>
       </div>
 
-      {/* 월 선택 */}
-      <div className="mb-[18px] flex flex-wrap items-end gap-[10px] rounded-xl border border-border bg-[#f7f8fa] px-[14px] py-3">
-        <label className="flex flex-col gap-1 text-[12px] text-muted">
-          기준 월
-          <select
-            className="rounded-[10px] border border-border bg-white px-3 py-[9px] text-sm text-text"
-            value={month}
-            onChange={(e) => setMonth(e.target.value)}
-          >
-            {recentMonths(24).map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
-        </label>
+      {/* 기간 선택 (년/반기/분기/월) */}
+      <div className="mb-[18px] flex flex-wrap items-end gap-[14px] rounded-xl border border-border bg-[#f7f8fa] px-[14px] py-3">
+        <PeriodPicker value={period} onChange={setPeriod} years={years} />
         <p className="m-0 max-w-[420px] text-[12px] text-muted">
-          체험·신규·매출·비용은 <strong>{month}</strong> 기준, 총 회원은 전체 로스터 기준입니다.
+          체험·신규·매출·비용은 <strong>{periodLabel(period)}</strong> 기준, 총 회원은 전체 로스터 기준입니다.
         </p>
       </div>
 
@@ -203,7 +207,7 @@ export default function Dashboard() {
             <table className="w-full whitespace-nowrap border-collapse text-[13px]">
               <thead>
                 <tr>
-                  {['지점', '체험(월)', '신규등록(월)', '총 회원', '매출(월)', '비용(월)', '인건비율', '임대료율'].map(
+                  {['지점', '체험', '신규등록', '총 회원', '매출', '비용', '인건비율', '임대료율'].map(
                     (h) => (
                       <th
                         key={h}

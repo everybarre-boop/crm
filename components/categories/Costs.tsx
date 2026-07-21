@@ -158,7 +158,16 @@ export default function Costs() {
     if (!valid.length) return;
     setSaving(true);
     try {
-      const payload = valid.map((r) => ({
+      // 같은 (지점·연월)이 한 파일 안에 여러 번 있으면, 한 번의 upsert 로 같은 행을
+      // 두 번 건드려 Postgres 가 배치 전체를 거부한다("ON CONFLICT ... cannot affect
+      // row a second time") → 아무것도 저장되지 않는다. 미리 (지점,연월) 기준으로
+      // 병합해(마지막 값 우선) 이를 막는다.
+      const byKey = new Map<string, Parsed>();
+      for (const r of valid) byKey.set(`${r.지점}${r.연월}`, r);
+      const merged = Array.from(byKey.values());
+      const dupMerged = valid.length - merged.length;
+
+      const payload = merged.map((r) => ({
         지점: r.지점,
         연월: r.연월,
         인건비: r.인건비,
@@ -167,15 +176,30 @@ export default function Costs() {
         메모: r.메모,
         updated_at: new Date().toISOString(),
       }));
-      const { error } = await sb.from(COSTS_TABLE).upsert(payload, { onConflict: '지점,연월' });
+      // .select() 로 실제로 DB에 쓰인 행을 되받아 저장을 확인한다.
+      const { data, error } = await sb
+        .from(COSTS_TABLE)
+        .upsert(payload, { onConflict: '지점,연월' })
+        .select();
       if (error) throw error;
-      toast(`${payload.length}건 저장했습니다.`);
+
+      const saved = data?.length ?? 0;
+      if (saved === 0) {
+        toast(
+          '저장된 행을 확인하지 못했습니다. 관리자 계정으로 로그인했는지/권한(RLS)을 확인하세요.',
+          'err',
+        );
+        return;
+      }
+      toast(`${saved}건 저장했습니다.${dupMerged ? ` (같은 지점·월 ${dupMerged}건은 병합)` : ''}`);
       setRows([]);
       setFileName('');
     } catch (err) {
       let msg = (err as Error).message || String(err);
       if (/branch_costs/i.test(msg) || /relation.*does not exist/i.test(msg)) {
         msg += ' — 비용 테이블을 만들려면 sql/2026-07_setup_all.sql 을 Supabase에서 실행하세요.';
+      } else if (/affect row a second time/i.test(msg)) {
+        msg += ' — 파일에 같은 지점·월이 중복돼 있습니다.';
       }
       toast('저장 실패: ' + msg, 'err');
     } finally {

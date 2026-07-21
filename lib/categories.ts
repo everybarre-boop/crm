@@ -3,6 +3,7 @@ import Dashboard from '@/components/categories/Dashboard';
 import Members from '@/components/categories/Members';
 import MemberSummary from '@/components/categories/MemberSummary';
 import Costs from '@/components/categories/Costs';
+import BranchCosts from '@/components/categories/BranchCosts';
 import Upload from '@/components/categories/Upload';
 
 /* ======================================================================
@@ -23,5 +24,6 @@ export const CATEGORIES: Category[] = [
   { id: 'members', label: '회원 관리', icon: '👥', Component: Members },
   { id: 'summary', label: '회원별 집계', icon: '🧾', Component: MemberSummary },
   { id: 'costs', label: '비용 업로드', icon: '💰', Component: Costs },
+  { id: 'branch-costs', label: '지점별 비용 집계', icon: '🏢', Component: BranchCosts },
   { id: 'upload', label: '데이터 업로드', icon: '⬆️', Component: Upload },
 ];
