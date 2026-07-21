@@ -16,6 +16,8 @@ import {
   fmtNum,
   sanitizeSearchTerm,
   fetchAllRows,
+  personKey,
+  isUsableTicket,
   type MemberRecord,
 } from '@/lib/members';
 import { useToast } from '@/components/ui/Toast';
@@ -44,6 +46,12 @@ export default function Members() {
 
   const [editRow, setEditRow] = useState<MemberRecord | null>(null);
   const [delRow, setDelRow] = useState<MemberRecord | null>(null);
+
+  // ── 요약 통계: 총 회원 / 현재 사용 / 만료 (1인 = 이름+연락처, 현재 필터 반영) ──────────
+  // 총 회원 = 필터에 걸린 사람 수(중복 등록건은 1명으로), 현재 사용 = 종료일이 안 지났고
+  // 잔여횟수 > 0 인 수강권을 하나라도 가진 사람, 만료 = 나머지(종료일 지났거나 잔여 소진).
+  // 지점 선택이 없으면 전체가 대상.
+  const [stats, setStats] = useState<{ total: number; active: number; expired: number } | null>(null);
 
   const loadSeq = useRef(0); // 동시 load() 경쟁 방지: 낡은 응답이 최신 결과를 덮어쓰지 않게 함
 
@@ -92,6 +100,47 @@ export default function Members() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // 요약 통계 계산: 현재 필터에 걸린 "모든" 행을 가벼운 컬럼만 골라 페이지 단위로 받아
+  // 이름+연락처로 1인 단위로 묶는다. (페이지네이션과 무관하게 전체를 집계) 필터를 빠르게
+  // 바꿔도 매번 전체를 긁지 않도록 350ms 디바운스한다.
+  useEffect(() => {
+    let alive = true;
+    const t = setTimeout(async () => {
+      try {
+        const PAGE = 1000;
+        const activeByPerson = new Map<string, boolean>(); // personKey → 사용 가능 수강권 보유 여부
+        for (let from = 0; ; from += PAGE) {
+          let query = sb.from(TABLE).select('이름,연락처,잔여횟수,수강권종료일');
+          const term = sanitizeSearchTerm(q);
+          if (term) query = query.or(SEARCH_COLS.map((c) => `${c}.ilike.%${term}%`).join(','));
+          for (const c of FILTER_COLS) if (filters[c]) query = query.eq(c, filters[c]);
+          if (branch) query = query.ilike(BRANCH_SRC_COL, `%${branch}%`);
+          if (usedMin !== '' && !isNaN(Number(usedMin))) query = query.gte(USED_COUNT, Number(usedMin));
+          if (usedMax !== '' && !isNaN(Number(usedMax))) query = query.lte(USED_COUNT, Number(usedMax));
+          const { data, error } = await query.range(from, from + PAGE - 1);
+          if (error) throw error;
+          const chunk = (data as unknown as MemberRecord[]) || [];
+          for (const r of chunk) {
+            const k = personKey(r);
+            activeByPerson.set(k, (activeByPerson.get(k) || false) || isUsableTicket(r));
+          }
+          if (chunk.length < PAGE || from + PAGE >= 50000) break;
+        }
+        if (!alive) return;
+        let activeN = 0;
+        for (const a of activeByPerson.values()) if (a) activeN++;
+        const totalN = activeByPerson.size;
+        setStats({ total: totalN, active: activeN, expired: totalN - activeN });
+      } catch {
+        if (alive) setStats(null); // 실패해도 표는 그대로 — 요약만 숨긴다
+      }
+    }, 350);
+    return () => {
+      alive = false;
+      clearTimeout(t);
+    };
+  }, [q, filters, branch, usedMin, usedMax]);
 
   // 필터 드롭다운 옵션: 저카디널리티 컬럼(성별·수강권종류)의 실제 값 목록을 한 번 수집
   useEffect(() => {
@@ -253,6 +302,13 @@ export default function Members() {
         >
           필터 초기화
         </button>
+
+        {/* 요약 통계 — 현재 필터(지점 등) 기준 1인 단위 집계. 지점 미선택 시 전체 대상. */}
+        <div className="ml-auto flex flex-wrap items-center gap-2 self-center">
+          <StatChip label="총 회원" value={stats?.total} loading={stats === null} />
+          <StatChip label="현재 사용" value={stats?.active} tone="green" loading={stats === null} />
+          <StatChip label="만료" value={stats?.expired} tone="muted" loading={stats === null} />
+        </div>
       </div>
 
       <div className="overflow-x-auto rounded-xl border border-border">
@@ -358,6 +414,29 @@ export default function Members() {
         />
       )}
     </>
+  );
+}
+
+/* -------------------- 요약 통계 칩 -------------------- */
+function StatChip({
+  label,
+  value,
+  tone,
+  loading,
+}: {
+  label: string;
+  value: number | undefined;
+  tone?: 'green' | 'muted';
+  loading?: boolean;
+}) {
+  const toneCls = tone === 'green' ? 'text-[#137333]' : tone === 'muted' ? 'text-muted' : 'text-text';
+  return (
+    <div className="flex items-center gap-2 rounded-[10px] border border-border bg-white px-3 py-[7px]">
+      <span className="text-[12px] text-muted">{label}</span>
+      <span className={`text-[15px] font-bold tabular-nums ${toneCls}`}>
+        {loading ? '…' : fmtNum(value)}
+      </span>
+    </div>
   );
 }
 

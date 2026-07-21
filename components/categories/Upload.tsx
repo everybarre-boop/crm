@@ -1,15 +1,42 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { sb } from '@/lib/supabase';
-import { TABLE, COLUMNS, makeKey, type MemberRecord } from '@/lib/members';
+import { TABLE, makeKey, canonicalColumn, type MemberRecord } from '@/lib/members';
 import { SALES_TABLE, toSalesRecord } from '@/lib/sales';
 import { btn, card } from '@/components/ui/styles';
 
 type LogLine = { msg: string; kind: 'ok' | 'err' | 'info' };
 
-const norm = (s: string) => String(s).replace(/\s+/g, '').trim();
+/* 엑셀 행을 "표준 컬럼명" 행으로 정규화한다(별칭 해석 포함). 이렇게 한 번 맞춰두면
+   members(정규화 매핑)와 sales(정확 헤더 참조) 두 저장 경로가 모두 같은 표준명을 본다.
+   - 매핑 안 된 헤더는 unmapped 로 모아 로그에 보여준다(어떤 엑셀 컬럼이 무시됐는지).
+   - 같은 표준 컬럼에 여러 헤더가 오면(예: 연락처+휴대폰) 먼저 온 "빈 값 아님"을 유지. */
+function canonicalizeRows(rows: Record<string, unknown>[]): {
+  rows: Record<string, unknown>[];
+  unmapped: string[];
+} {
+  const unmapped = new Set<string>();
+  const out = rows.map((row) => {
+    const rec: Record<string, unknown> = {};
+    for (const key in row) {
+      const col = canonicalColumn(key);
+      if (!col) {
+        unmapped.add(String(key));
+        continue;
+      }
+      const cur = rec[col];
+      if (cur === undefined || cur === null || cur === '') rec[col] = row[key];
+    }
+    return rec;
+  });
+  return { rows: out, unmapped: [...unmapped] };
+}
+
+function hasAnyValue(rows: Record<string, unknown>[], col: string): boolean {
+  return rows.some((r) => r[col] != null && String(r[col]).trim() !== '');
+}
 
 function formatSize(b: number): string {
   if (b < 1024) return b + ' B';
@@ -68,13 +95,6 @@ export default function Upload() {
   const [toSales, setToSales] = useState(true);
   const fileInput = useRef<HTMLInputElement>(null);
 
-  // 엑셀 헤더(정규화) → members DB 컬럼 매핑
-  const columnMap = useMemo(() => {
-    const m: Record<string, string> = {};
-    COLUMNS.forEach((c) => (m[norm(c)] = c));
-    return m;
-  }, []);
-
   function addFiles(list: FileList | null) {
     if (!list) return;
     setFiles((prev) => [...prev, ...Array.from(list)]);
@@ -83,12 +103,12 @@ export default function Upload() {
     setFiles((prev) => prev.filter((_, idx) => idx !== i));
   }
 
-  // 엑셀 행 → members 레코드 (매핑되는 컬럼만)
+  // 표준화된 행 → members 레코드. (canonicalizeRows 로 키가 이미 표준 컬럼명이라 그대로 담는다)
   function toMemberRecord(row: Record<string, unknown>): MemberRecord {
     const rec: MemberRecord = {};
     for (const key in row) {
-      const col = columnMap[norm(key)];
-      if (col) rec[col] = row[key] === '' ? null : String(row[key]);
+      const v = row[key];
+      rec[key] = v === '' || v == null ? null : String(v);
     }
     rec.dedup_key = makeKey(rec);
     return rec;
@@ -121,10 +141,26 @@ export default function Upload() {
       }
       const rawCount = rows.length;
 
+      // 엑셀 헤더를 표준 컬럼명으로 한 번 정규화(별칭 해석). 두 저장 경로가 이 결과를 공유한다.
+      const { rows: crows, unmapped } = canonicalizeRows(rows);
+      if (unmapped.length) {
+        addLog({
+          msg: `ℹ️ ${f.name} — 무시된 컬럼(표준 컬럼/별칭에 없음): ${unmapped.join(', ')}`,
+          kind: 'info',
+        });
+      }
+      // 연락처가 통째로 비면 사람 식별(이름+연락처)이 무너진다 — 헤더 이름을 바로 알린다.
+      if (toMembers && !hasAnyValue(crows, '연락처')) {
+        addLog({
+          msg: `⚠️ ${f.name} — 연락처 값이 하나도 없습니다. 엑셀의 전화번호 컬럼명을 확인하세요(필요하면 별칭에 추가).`,
+          kind: 'err',
+        });
+      }
+
       // ── 회원(members) 저장 ──────────────────────────────────────────────
       if (toMembers) {
         try {
-          const records = dedupeByKey(rows.map(toMemberRecord));
+          const records = dedupeByKey(crows.map(toMemberRecord));
           const merged = rawCount - records.length;
           const saved = await upsertBatches(TABLE, records, (n) =>
             setStatus(`${f.name} · 회원 저장 중… ${n}/${records.length}`),
@@ -143,7 +179,7 @@ export default function Upload() {
       // ── 매출(sales) 저장 ────────────────────────────────────────────────
       if (toSales) {
         try {
-          const records = dedupeByKey(rows.map(toSalesRecord));
+          const records = dedupeByKey(crows.map(toSalesRecord));
           const merged = rawCount - records.length;
           const saved = await upsertBatches(SALES_TABLE, records, (n) =>
             setStatus(`${f.name} · 매출 저장 중… ${n}/${records.length}`),
@@ -179,6 +215,7 @@ export default function Upload() {
         <p className="m-0 text-[13px] text-muted">
           회원 엑셀(.xlsx, .xls) · CSV 한 장을 올리면 <strong>회원 정보는 <code>members</code></strong>, <strong>결제(매출)
           정보는 <code>sales</code></strong> 테이블로 나눠 upsert 됩니다. 같은 건은 중복 없이 갱신됩니다.
+          헤더 이름이 조금 달라도(예: 휴대폰·전화번호 → 연락처) 별칭으로 인식하며, 매핑 안 된 컬럼은 저장 로그에 표시됩니다.
         </p>
       </div>
 

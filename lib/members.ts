@@ -31,6 +31,45 @@ export const SEARCH_COLS = ['이름', '연락처', '수강권명', '수강권종
 export const FILTER_COLS = ['성별', '수강권종류'] as const;
 
 /* ----------------------------------------------------------------------
+   엑셀 헤더 → 표준(DB) 컬럼명 해석.
+   업로드는 "엑셀 헤더명 = DB 컬럼명"이 원칙이지만, 예약사이트마다 헤더 이름이
+   조금씩 달라(특히 전화번호: 휴대폰/전화번호/핸드폰 …) 값이 통째로 누락되기 쉽다.
+   그래서 공백 제거+소문자로 정규화한 헤더를 표준 컬럼명으로 매핑한다.
+   - normHeader: 헤더 정규화(공백 제거·소문자). 한글은 대소문자 영향 없음.
+   - COLUMN_ALIASES: 별칭(정규화된 키) → 표준 컬럼명. 여기 없으면 헤더 그대로 매칭.
+   - canonicalColumn: 헤더 하나를 표준 컬럼명으로. 모르면 undefined(=무시할 컬럼).
+   ---------------------------------------------------------------------- */
+export function normHeader(s: unknown): string {
+  return String(s ?? '').replace(/\s+/g, '').trim().toLowerCase();
+}
+
+// 표준 컬럼(정규화) → 표준 컬럼명. 헤더가 표준명과 같으면 그대로 인식.
+const COLUMN_BY_NORM: Record<string, string> = Object.fromEntries(
+  COLUMNS.map((c) => [normHeader(c), c]),
+);
+
+// 별칭(정규화된 키) → 표준 컬럼명. 새 표기를 발견하면 여기에 추가만 하면 된다.
+export const COLUMN_ALIASES: Record<string, string> = {
+  // 전화번호 계열 → 연락처
+  휴대폰: '연락처',
+  휴대폰번호: '연락처',
+  전화번호: '연락처',
+  전화: '연락처',
+  핸드폰: '연락처',
+  핸드폰번호: '연락처',
+  연락처번호: '연락처',
+  연락처1: '연락처',
+  phone: '연락처',
+  mobile: '연락처',
+  tel: '연락처',
+};
+
+export function canonicalColumn(header: unknown): string | undefined {
+  const n = normHeader(header);
+  return COLUMN_BY_NORM[n] ?? COLUMN_ALIASES[n];
+}
+
+/* ----------------------------------------------------------------------
    지점 — 별도 컬럼이 아니라 수강권명 안에 들어있다. (예: "체험권(광교)")
    그래서 지점 필터는 수강권명 부분일치로 거른다: 서버는 .ilike, 클라이언트는
    matchesBranch(). dedup_key 는 이미 수강권명을 포함하므로 지점이 다르면
