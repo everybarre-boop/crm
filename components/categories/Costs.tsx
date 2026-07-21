@@ -32,6 +32,34 @@ type Parsed = {
   _reason: string;
 };
 
+/* 시트 한 장(AOA)에서 헤더행을 자동 탐색해 레코드 배열로 바꾼다.
+   - 제목/빈 행이 위에 있어도 '지점' + ('연월'|'인건비') 를 포함한 행을 헤더로 인식한다.
+   - 헤더 위치를 1행으로 가정하던 기존 방식은, 행이 한 칸만 밀려도 전체가
+     0/공란으로 파싱되던 문제가 있었다(전량 "지점명 없음" 오류). */
+function rowsFromSheet(aoa: unknown[][]): Record<string, unknown>[] {
+  let hi = -1;
+  for (let i = 0; i < aoa.length; i++) {
+    const cells = (aoa[i] ?? []).map((c) => norm(String(c ?? '')));
+    if (cells.includes('지점') && (cells.includes('연월') || cells.includes('인건비'))) {
+      hi = i;
+      break;
+    }
+  }
+  if (hi < 0) return [];
+  const header = (aoa[hi] ?? []).map((c) => String(c ?? '').trim());
+  const out: Record<string, unknown>[] = [];
+  for (let r = hi + 1; r < aoa.length; r++) {
+    const row = aoa[r] ?? [];
+    if (row.every((c) => String(c ?? '').trim() === '')) continue; // 빈 행 스킵
+    const rec: Record<string, unknown> = {};
+    header.forEach((h, c) => {
+      if (h) rec[h] = row[c] ?? '';
+    });
+    out.push(rec);
+  }
+  return out;
+}
+
 function readRows(f: File): Promise<Record<string, unknown>[]> {
   return new Promise((resolve, reject) => {
     const name = f.name.toLowerCase();
@@ -43,8 +71,26 @@ function readRows(f: File): Promise<Record<string, unknown>[]> {
         const wb = name.endsWith('.csv')
           ? XLSX.read(result as string, { type: 'string' })
           : XLSX.read(result as ArrayBuffer, { type: 'array' });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        resolve(XLSX.utils.sheet_to_json(ws, { raw: false, defval: '' }));
+        // 모든 시트를 훑어 헤더가 있는 시트의 행을 모은다(월별 시트가 여러 장이어도 OK).
+        const all: Record<string, unknown>[] = [];
+        for (const sn of wb.SheetNames) {
+          const aoa = XLSX.utils.sheet_to_json(wb.Sheets[sn], {
+            header: 1,
+            raw: false,
+            defval: '',
+            blankrows: false,
+          }) as unknown[][];
+          all.push(...rowsFromSheet(aoa));
+        }
+        if (!all.length) {
+          reject(
+            new Error(
+              `'지점'·'연월' 헤더를 찾지 못했습니다. 양식(지점·연월·인건비·임대료·기타비용·메모)을 확인하세요. 시트: ${wb.SheetNames.join(', ')}`,
+            ),
+          );
+          return;
+        }
+        resolve(all);
       } catch (err) {
         reject(err);
       }
