@@ -9,6 +9,26 @@ import { btn, input } from '@/components/ui/styles';
    ⚠️ RLS(members 테이블 정책)의 관리자 화이트리스트와 반드시 동일해야 한다. */
 const ADMIN_EMAIL = 'basegolf.official@gmail.com';
 
+/* 인증 실패 원인을 "사용자가 조치할 수 있는 문구"로 번역한다.
+   ⚠️ 서버에 닿지 못한 것과 비밀번호가 틀린 것은 완전히 다른 문제인데,
+   Supabase 원본 메시지를 그대로 보여주면 둘 다 "로그인 실패"로만 보인다.
+   (무료 플랜 프로젝트가 자동 일시정지돼 호스트가 사라졌을 때 실제로
+   비밀번호 오류로 오해한 적이 있다.) */
+function describeAuthError(err: { name?: string; status?: number; message?: string }): string {
+  const msg = err.message ?? '';
+  if (typeof navigator !== 'undefined' && navigator.onLine === false)
+    return '인터넷에 연결돼 있지 않습니다. 네트워크를 확인한 뒤 다시 시도하세요.';
+  // fetch 자체가 실패하면 status 가 없거나 0 이다(supabase-js: AuthRetryableFetchError).
+  if (err.name === 'AuthRetryableFetchError' || !err.status || /fetch|network|load failed/i.test(msg))
+    return '서버에 연결할 수 없습니다 — 비밀번호 문제가 아닙니다. Supabase 프로젝트가 일시정지(paused)됐는지 대시보드에서 확인하고 Resume 하세요.';
+  if (/invalid login credentials/i.test(msg)) return '비밀번호가 올바르지 않습니다.';
+  if (/email not confirmed/i.test(msg))
+    return '관리자 계정이 아직 확인되지 않았습니다. Supabase 대시보드 → Authentication → Users 에서 확인 처리하세요.';
+  if (err.status === 429 || /rate limit/i.test(msg))
+    return '시도가 너무 잦습니다. 잠시 후 다시 시도하세요.';
+  return '로그인 실패: ' + msg;
+}
+
 /* 로그인 화면.
    ⚠️ 이 화면은 데이터를 지키지 못한다 — 화면 전환용 UI일 뿐이다.
    실제 접근 통제는 Supabase RLS(members 테이블 정책)가 한다.
@@ -26,7 +46,7 @@ export default function LoginScreen() {
     const { error } = await sb.auth.signInWithPassword({ email: ADMIN_EMAIL, password });
     setBusy(false);
     // 성공 시 onAuthStateChange 리스너(page.tsx)가 화면을 전환한다.
-    if (error) setError('로그인 실패: ' + error.message);
+    if (error) setError(describeAuthError(error));
   }
 
   return (
