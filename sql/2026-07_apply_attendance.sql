@@ -6,8 +6,14 @@
 -- 매칭·갱신·dedup_key 재계산 로직을 파라미터화한 것이다.
 --
 -- 매칭 기준: 이름 + 수강권명 + 연락처(숫자만).  (gwanggyo SQL 과 동일)
--- dedup_key 공식: 이름∣연락처∣수강권명∣등록일∣전체횟수 (chr(31), NULL→'')  — makeKey 와 동일.
 -- used_count 는 STORED 생성 컬럼이라 자동 재계산(직접 update 안 함).
+--
+-- 🔁 2026-08 개정 — dedup_key 재계산을 없앴다.
+--    이전 KEY_COLS 에는 `전체횟수`가 들어 있어서, 이 RPC 가 전체횟수를 바꿀 때마다
+--    dedup_key 도 다시 계산해야 했다. 새 KEY_COLS(이름·연락처·수강권명·수강권시작일·
+--    결제구분/금액/일시/방법/할부)에는 이 RPC 가 건드리는 컬럼이 하나도 없다.
+--    → 전체/잔여횟수만 갱신하면 되고 dedup_key 는 그대로 두는 게 맞다.
+--    (오히려 옛 공식으로 다시 계산하면 키가 깨지므로 반드시 지워야 한다.)
 --
 -- ⚠️ 보안: SECURITY DEFINER 라 RLS 를 우회하므로, 함수 내부에서 호출자 이메일을
 --    관리자 화이트리스트로 검증한다. GitHub Actions 잡이 관리자 계정으로 로그인해
@@ -101,15 +107,9 @@ begin
       from jsonb_array_elements(records) e
     )
     update public.members mem
+    -- 전체/잔여횟수만 갱신한다. 이 두 컬럼은 KEY_COLS 에 없으므로 dedup_key 는 건드리지 않는다.
     set "전체횟수" = s.tot,
-        "잔여횟수" = s.rem,
-        -- 전체횟수가 바뀌므로 dedup_key 재계산 (makeKey 공식과 동일)
-        dedup_key =
-             coalesce(mem."이름",     '') || chr(31)
-          || coalesce(mem."연락처",   '') || chr(31)
-          || coalesce(mem."수강권명", '') || chr(31)
-          || coalesce(mem."등록일",   '') || chr(31)
-          || coalesce(s.tot, '')
+        "잔여횟수" = s.rem
     from src s
     where mem."이름"     = s.nm
       and mem."수강권명" = s.ticket

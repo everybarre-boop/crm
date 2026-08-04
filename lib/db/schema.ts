@@ -9,11 +9,10 @@
      맞춘 것이다. 스키마를 바꿀 때는 이 파일 수정 → `npm run db:generate` → 검토 →
      `npm run db:migrate` 순서로 반영한다.
 
-   ⚠️ 주의 — 실제 DB에는 `dedup_key` 컬럼/유니크 인덱스가 없다.
-      그러나 lib/members.ts(makeKey / onConflict:'dedup_key' / eq('dedup_key',…))와
-      CLAUDE.md 는 `dedup_key` 불변식을 전제한다. 즉 코드/문서와 실제 스키마가
-      어긋나 있다. 여기서는 "실제 DB" 를 그대로 반영했다(그래야 db:generate 가
-      허위 diff 를 만들지 않는다). 이 불일치 해소는 별도 결정 사항이다.
+   ✅ `dedup_key` 는 members·sales 양쪽에 실재한다(text + unique).
+      과거 members 에 없어 코드/문서와 어긋났으나 sql/2026-07_dedup_members.sql 로 해소됐다.
+      키를 이루는 컬럼 목록은 DB가 아니라 lib/members.ts 의 KEY_COLS 가 기준이다
+      (값은 앱이 계산해서 넣고, DB는 유니크 제약으로 덮어쓰기를 보장하는 역할만 한다).
    ====================================================================== */
 import { pgTable, pgPolicy, bigint, integer, text, jsonb, timestamp, unique } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
@@ -51,7 +50,8 @@ export const members = pgTable(
     usedCount: integer('used_count').generatedAlwaysAs(
       sql`(COALESCE(NULLIF(regexp_replace(COALESCE("전체횟수", ''), '[^0-9-]', '', 'g'), '')::int, 0) - COALESCE(NULLIF(regexp_replace(COALESCE("잔여횟수", ''), '[^0-9-]', '', 'g'), '')::int, 0))`,
     ),
-    // 중복 판정 키(이름·연락처·수강권명·등록일·전체횟수). 앱의 makeKey(KEY_COLS)가 계산해
+    // 중복 판정 키(이름·연락처·수강권명·수강권시작일·결제구분/금액/일시/방법/할부).
+    // 앱의 makeKey(KEY_COLS)가 계산해
     // 보내고, unique 인덱스가 재업로드 시 덮어쓰기(upsert onConflict:'dedup_key')를 보장한다.
     // (백필/유니크는 sql/2026-07_dedup_members.sql 로 반영)
     dedupKey: text('dedup_key').unique(),

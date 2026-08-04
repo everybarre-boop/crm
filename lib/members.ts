@@ -14,12 +14,27 @@ export const COLUMNS = [
   '수강권시작일', '수강권종료일',
 ] as const;
 
-// upsert 충돌 판단용 고유 키(중복 판정 기준). KEY_COLS 변경 시 DB unique 인덱스 기준(및
-// dedup_key 백필 SQL 공식)도 함께 바꿀 것. 아래 5개가 모두 같으면 "같은 데이터"로 보고
-// 재업로드 시 덮어쓴다: 이름 · 연락처 · 수강권명 · 등록일 · 전체횟수(수강권 등록 횟수).
-// "변하는 값"(잔여/예약가능/취소가능 횟수, 결제금액 등)은 넣지 말 것 — 넣으면 중복 행이 생긴다.
+/* upsert 충돌 판단용 고유 키(중복 판정 기준) = "수강권 등록건 1건"을 식별하는 컬럼들.
+   ----------------------------------------------------------------------------
+   ⚠️ 2026-08 개정 — 이전 키(`이름·연락처·수강권명·등록일·전체횟수`)는 사용횟수를
+      48% 누락시켰다. 예약사이트 내보내기에 `등록일` 컬럼이 없어 그 자리가 항상 빈 값이라,
+      **같은 사람이 같은 수강권을 재등록한 건이 전부 1건으로 뭉개졌다.**
+      (실측: 이가원 엑셀 55행 632회 → DB 23행 173회. 전체 124,839회 → 65,201회)
+      대표 사례는 `언리미티드(판교) 전체 30회`를 19번 재등록한 건 — 19행이 1행이 됐다.
+
+   그래서 키를 "결제 1건 = 등록 1건"으로 바꿨다. 재등록은 결제일시/시작일이 다르므로
+   서로 다른 행으로 남는다. 실측 17,641행 중 17,617행이 고유(사용횟수 124,802/124,839).
+
+   🔑 키 설계 원칙 — **재업로드 때 값이 바뀌는 컬럼은 절대 넣지 말 것.**
+      키 컬럼이 바뀌면 upsert 가 "덮어쓰기"가 아니라 "새 행 추가"가 되어 중복이 쌓인다.
+      · 넣으면 안 되는 것: 잔여/예약가능/취소가능 횟수(매일 변함), `전체횟수`(횟수 조정으로
+        변함), `수강권종료일`(연장·홀드로 변함), `등록일`(파일에 없어 항상 빈 값).
+      · 넣어도 되는 것(등록 시점에 확정되고 이후 안 변함): 아래 9개.
+   KEY_COLS 를 바꾸면 dedup_key 값이 통째로 달라진다 — 기존 데이터는 초기화 후 재업로드하거나
+   백필 SQL 로 맞춰야 한다. (CLAUDE.md "dedup_key 불변식" 참고) */
 export const KEY_COLS = [
-  '이름', '연락처', '수강권명', '등록일', '전체횟수',
+  '이름', '연락처', '수강권명', '수강권시작일',
+  '결제구분', '결제금액', '결제일시', '결제방법', '할부개월수',
 ] as const;
 
 export const KEY_SEP = String.fromCharCode(31); // Unit Separator
@@ -116,6 +131,58 @@ export function phoneDigits(v: unknown): string {
 
 export function personKey(rec: Record<string, unknown>): string {
   return String(rec['이름'] ?? '').trim() + KEY_SEP + phoneDigits(rec['연락처']);
+}
+
+/* ----------------------------------------------------------------------
+   동일인 판정 — 지점이 달라도 이름+연락처가 같으면 한 사람으로 합친다.
+   (예: 판교 이가원 · 반포 이가원 · 옥수 이가원 → 010-9098-8696 한 사람으로 묶여
+    사용횟수가 전 지점 합산된다.)
+
+   personKey() 만 쓰면 **연락처가 빈 행이 별개 인물로 쪼개진다**(실측 385행 · 112명).
+   그래서 전체 행을 한 번 훑어 이름별 연락처 목록을 만들고:
+     · 연락처가 있으면      → 이름+연락처 (기존과 동일)
+     · 연락처가 비어 있고, 그 이름의 연락처가 **딱 하나뿐**이면 → 그 사람으로 붙인다
+     · 그 이름에 연락처가 여럿이면(동명이인) → 판정 불가라 붙이지 않고 따로 둔다
+   동명이인을 잘못 합치지 않기 위한 보수적 규칙이다. 실측상 '김민정'처럼 서로 다른
+   연락처가 24개인 이름도 있어서, 이름만으로 합치는 것은 절대 안 된다.
+
+   사용법:
+     const keyOf = makePersonResolver(memberRows, salesRows);
+     const k = keyOf(rec);   // members·sales 를 같은 기준으로 묶는다
+   ---------------------------------------------------------------------- */
+export function makePersonResolver(
+  ...rowSets: Array<readonly Record<string, unknown>[] | null | undefined>
+): (rec: Record<string, unknown>) => string {
+  const phonesByName = new Map<string, Set<string>>();
+  for (const rows of rowSets) {
+    if (!rows) continue;
+    for (const r of rows) {
+      const name = String(r['이름'] ?? '').trim();
+      if (!name) continue;
+      const ph = phoneDigits(r['연락처']);
+      if (!ph) continue;
+      let set = phonesByName.get(name);
+      if (!set) phonesByName.set(name, (set = new Set()));
+      set.add(ph);
+    }
+  }
+  return (rec) => {
+    const name = String(rec['이름'] ?? '').trim();
+    const ph = phoneDigits(rec['연락처']);
+    if (ph) return name + KEY_SEP + ph;
+    const set = phonesByName.get(name);
+    if (set && set.size === 1) return name + KEY_SEP + [...set][0]; // 유일하니 그 사람으로
+    return name + KEY_SEP + ''; // 판정 불가 — 따로 둔다
+  };
+}
+
+/* ----------------------------------------------------------------------
+   등록일 대체 — 예약사이트 내보내기에 `등록일` 컬럼이 없어(2026-07-21 이후) DB 전 행이
+   빈 값이다. 기간별 집계(신규·체험 등)가 통째로 0이 되므로, 없으면 `수강권시작일`을 쓴다.
+   ---------------------------------------------------------------------- */
+export function regDate(rec: Record<string, unknown>): string {
+  const v = String(rec['등록일'] ?? '').trim();
+  return v || String(rec['수강권시작일'] ?? '').trim();
 }
 
 // used_count = 전체횟수 − 잔여횟수 (사용횟수). DB에는 members.used_count 생성 컬럼으로도 존재.

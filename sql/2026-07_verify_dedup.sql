@@ -27,15 +27,21 @@ where schemaname = 'public'
 order by tablename;
 
 -- 3) dedup_key 가 실제 값과 어긋난 행이 있는가? (0 이어야 정상 — makeKey 공식과 일치 확인)
---    공식: 이름 ∣ 연락처 ∣ 수강권명 ∣ 등록일 ∣ 전체횟수  (chr(31) 구분, NULL→'')
+--    공식(KEY_COLS, 2026-08 개정): 이름 ∣ 연락처 ∣ 수강권명 ∣ 수강권시작일 ∣
+--                                  결제구분 ∣ 결제금액 ∣ 결제일시 ∣ 결제방법 ∣ 할부개월수
+--                                  (chr(31) 구분, NULL→'')
 select count(*) as "공식과_어긋난_행수"
 from public.members m
 where m.dedup_key is distinct from (
-       coalesce(m."이름",     '') || chr(31)
-    || coalesce(m."연락처",   '') || chr(31)
-    || coalesce(m."수강권명", '') || chr(31)
-    || coalesce(m."등록일",   '') || chr(31)
-    || coalesce(m."전체횟수", '')
+       coalesce(m."이름",         '') || chr(31)
+    || coalesce(m."연락처",       '') || chr(31)
+    || coalesce(m."수강권명",     '') || chr(31)
+    || coalesce(m."수강권시작일", '') || chr(31)
+    || coalesce(m."결제구분",     '') || chr(31)
+    || coalesce(m."결제금액",     '') || chr(31)
+    || coalesce(m."결제일시",     '') || chr(31)
+    || coalesce(m."결제방법",     '') || chr(31)
+    || coalesce(m."할부개월수",   '')
 );
 -- → 이 값이 0 이 아니면, apply_attendance 반영 전에 dedup_key 를 재백필해야 한다.
 --   (재백필 공식은 sql/2026-07_dedup_members.sql 참고.)

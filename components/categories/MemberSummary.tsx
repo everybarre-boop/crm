@@ -10,7 +10,7 @@ import {
   isTrial,
   isUsableTicket,
   phoneDigits,
-  personKey,
+  makePersonResolver,
   matchesBranch,
   BRANCHES,
   type MemberRecord,
@@ -79,12 +79,14 @@ export default function MemberSummary() {
     };
   }, []);
 
-  // 이름+연락처(숫자)로 1인 단위 그룹핑
+  // 이름+연락처(숫자)로 1인 단위 그룹핑 — 지점이 달라도 같은 사람이면 한 행으로 합친다.
+  // (연락처가 빈 행은 그 이름의 연락처가 유일할 때만 붙인다 — makePersonResolver 참고)
   const people = useMemo(() => {
     if (!memberRows) return null;
+    const keyOf = makePersonResolver(memberRows, salesRows);
     const map = new Map<string, Person>();
     const get = (rec: MemberRecord): Person => {
-      const k = personKey(rec);
+      const k = keyOf(rec);
       let p = map.get(k);
       if (!p) {
         p = {

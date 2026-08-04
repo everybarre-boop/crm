@@ -13,6 +13,7 @@
     "db:push": "drizzle-kit push",
     "db:pull": "drizzle-kit pull",
     "db:studio": "drizzle-kit studio",
+    "db:backup": "node scripts/backup-table.mjs",
     "daily": "node automation/run.mjs"
   },
   "dependencies": {

@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { sb } from '@/lib/supabase';
@@ -9,14 +9,14 @@ import {
   FILTER_COLS,
   BRANCHES,
   BRANCH_SRC_COL,
-  USED_COUNT,
   EDITABLE,
   NUM_COLS,
   makeKey,
   fmtNum,
+  usedCount,
   sanitizeSearchTerm,
   fetchAllRows,
-  personKey,
+  makePersonResolver,
   isUsableTicket,
   type MemberRecord,
 } from '@/lib/members';
@@ -32,7 +32,8 @@ export default function Members() {
   const [page, setPage] = useState(0);
   const [size, setSize] = useState(50);
   const [q, setQ] = useState('');
-  const [sort, setSort] = useState<string>('등록일');
+  // 기본 정렬 — 예약사이트 내보내기에 등록일이 없어 전 행이 빈 값이라, 수강권시작일로 정렬한다.
+  const [sort, setSort] = useState<string>('수강권시작일');
   const [dir, setDir] = useState(false); // false = 내림차순
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -53,49 +54,145 @@ export default function Members() {
   // 지점 선택이 없으면 전체가 대상.
   const [stats, setStats] = useState<{ total: number; active: number; expired: number } | null>(null);
 
+  /* ── 1인 합산 사용횟수 인덱스 ────────────────────────────────────────────────
+     사용횟수 필터는 "이 사람이 지금까지 몇 회 했나"로 걸러야 한다. DB의 used_count
+     컬럼은 **수강권 1건짜리** 값이라 그걸로 거르면(예전 방식) 한 수강권에서만 100회
+     넘게 쓴 행을 찾게 된다 — 사람 단위 합산이 아니다.
+     그래서 전체 members 를 가벼운 컬럼만 한 번 읽어 사람별 합계를 만들어 둔다.
+     ⚠️ 지점 필터와 무관하게 **전 지점 합산**이다(판교 이가원 + 반포 이가원 = 한 사람). */
+  const [personTotals, setPersonTotals] = useState<Map<string, number> | null>(null);
+  const [personKeyOf, setPersonKeyOf] = useState<((r: Record<string, unknown>) => string) | null>(null);
+  const [indexError, setIndexError] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0); // 수정/삭제 후 인덱스 재계산용
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const all = await fetchAllRows('이름,연락처,전체횟수,잔여횟수');
+        if (!alive) return;
+        const keyOf = makePersonResolver(all);
+        const totals = new Map<string, number>();
+        for (const r of all) {
+          const k = keyOf(r);
+          totals.set(k, (totals.get(k) ?? 0) + usedCount(r));
+        }
+        setPersonKeyOf(() => keyOf);
+        setPersonTotals(totals);
+        setIndexError(false);
+      } catch {
+        if (alive) {
+          setPersonTotals(null);
+          setIndexError(true);
+        }
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [refreshKey]);
+
   const loadSeq = useRef(0); // 동시 load() 경쟁 방지: 낡은 응답이 최신 결과를 덮어쓰지 않게 함
+
+  // 사용횟수 범위가 입력돼 있나 (둘 중 하나라도)
+  const minN = usedMin !== '' && !isNaN(Number(usedMin)) ? Number(usedMin) : null;
+  const maxN = usedMax !== '' && !isNaN(Number(usedMax)) ? Number(usedMax) : null;
+  const usedFilterOn = minN !== null || maxN !== null;
 
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
     setLoading(true);
     setLoadError(null);
     try {
-      let query = sb.from(TABLE).select('*', { count: 'exact' });
-      const term = sanitizeSearchTerm(q);
-      if (term) {
-        query = query.or(SEARCH_COLS.map((c) => `${c}.ilike.%${term}%`).join(','));
+      // 검색·드롭다운·지점은 서버에서 거른다(사용횟수 제외 — 그건 사람 단위라 아래에서).
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      const applyServerFilters = (q0: any): any => {
+        let qq = q0;
+        const term = sanitizeSearchTerm(q);
+        if (term) qq = qq.or(SEARCH_COLS.map((c) => `${c}.ilike.%${term}%`).join(','));
+        for (const c of FILTER_COLS) if (filters[c]) qq = qq.eq(c, filters[c]);
+        // 지점 — 수강권명에 "체험권(광교)"처럼 들어있어 부분일치로 거른다.
+        // 값은 BRANCHES 상수라 사용자 입력이 아니고, ilike 패턴은 값이 아니라 우리가 만든다.
+        if (branch) qq = qq.ilike(BRANCH_SRC_COL, `%${branch}%`);
+        return qq;
+      };
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+
+      if (!usedFilterOn) {
+        // ── 빠른 길: 사용횟수 필터가 없으면 서버 페이징 그대로 ──
+        const query = applyServerFilters(sb.from(TABLE).select('*', { count: 'exact' }))
+          .order(sort, { ascending: dir, nullsFirst: false })
+          .range(page * size, page * size + size - 1);
+        const { data, count, error } = await query;
+        if (seq !== loadSeq.current) return; // 더 새 load()가 시작됨 → 이 낡은 응답은 버린다
+        if (error) throw error;
+        setRows((data as unknown as MemberRecord[]) || []);
+        setTotal(count || 0);
+        return;
       }
-      // 드롭다운 필터 (성별·수강권종류) — 정확 일치(AND)
-      for (const c of FILTER_COLS) {
-        if (filters[c]) query = query.eq(c, filters[c]);
+
+      // ── 사람 단위 사용횟수 필터: 전체를 받아 사람별 합계로 거른 뒤 화면에서 페이징 ──
+      if (!personTotals || !personKeyOf) {
+        if (indexError) throw new Error('1인 합산 사용횟수를 계산하지 못했습니다.');
+        return; // 인덱스 준비 중 — 준비되면 이 effect 가 다시 돈다
       }
-      // 지점 — 수강권명에 "체험권(광교)"처럼 들어있어 부분일치로 거른다.
-      // 값은 BRANCHES 상수라 사용자 입력이 아니고, ilike 패턴은 값이 아니라 우리가 만든다.
-      if (branch) query = query.ilike(BRANCH_SRC_COL, `%${branch}%`);
-      // 사용횟수(전체−잔여) 범위 — DB의 used_count 생성 컬럼 기준
-      if (usedMin !== '' && !isNaN(Number(usedMin))) query = query.gte(USED_COUNT, Number(usedMin));
-      if (usedMax !== '' && !isNaN(Number(usedMax))) query = query.lte(USED_COUNT, Number(usedMax));
-      query = query
-        .order(sort, { ascending: dir, nullsFirst: false })
-        .range(page * size, page * size + size - 1);
-      const { data, count, error } = await query;
-      if (seq !== loadSeq.current) return; // 더 새 load()가 시작됨 → 이 낡은 응답은 버린다
-      if (error) throw error;
-      setRows((data as unknown as MemberRecord[]) || []);
-      setTotal(count || 0);
+      const PAGE = 1000;
+      const collected: MemberRecord[] = [];
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await applyServerFilters(sb.from(TABLE).select('*')).range(
+          from,
+          from + PAGE - 1,
+        );
+        if (seq !== loadSeq.current) return;
+        if (error) throw error;
+        const chunk = (data as unknown as MemberRecord[]) || [];
+        collected.push(...chunk);
+        if (chunk.length < PAGE || collected.length >= 50000) break;
+      }
+      const hit = collected.filter((r) => {
+        const t = personTotals.get(personKeyOf(r)) ?? 0;
+        if (minN !== null && t < minN) return false;
+        if (maxN !== null && t > maxN) return false;
+        return true;
+      });
+      // 서버 정렬을 못 쓰므로 같은 규칙으로 화면에서 정렬한다(빈 값은 항상 뒤).
+      const num = NUM_COLS.has(sort);
+      hit.sort((a, b) => {
+        const av = a[sort] ?? '';
+        const bv = b[sort] ?? '';
+        if (av === '' && bv === '') return 0;
+        if (av === '') return 1;
+        if (bv === '') return -1;
+        const c = num
+          ? Number(String(av).replace(/[^0-9.-]/g, '')) - Number(String(bv).replace(/[^0-9.-]/g, ''))
+          : String(av).localeCompare(String(bv), 'ko');
+        return dir ? c : -c;
+      });
+      if (seq !== loadSeq.current) return;
+      setRows(hit.slice(page * size, page * size + size));
+      setTotal(hit.length);
     } catch (err) {
       if (seq !== loadSeq.current) return;
-      let msg = (err as Error).message || String(err);
-      // used_count 컬럼 미생성 시(마이그레이션 전) 안내를 덧붙인다.
-      if (/used_count/i.test(msg)) {
-        msg += ' — 사용횟수 필터를 쓰려면 sql/2026-07_sales_and_used_count.sql 을 Supabase에서 실행하세요.';
-      }
-      setLoadError(msg);
+      setLoadError((err as Error).message || String(err));
       setRows([]);
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, [q, filters, branch, usedMin, usedMax, sort, dir, page, size]);
+  }, [
+    q,
+    filters,
+    branch,
+    usedFilterOn,
+    minN,
+    maxN,
+    sort,
+    dir,
+    page,
+    size,
+    personTotals,
+    personKeyOf,
+    indexError,
+  ]);
 
   useEffect(() => {
     load();
@@ -109,25 +206,35 @@ export default function Members() {
     const t = setTimeout(async () => {
       try {
         const PAGE = 1000;
-        const activeByPerson = new Map<string, boolean>(); // personKey → 사용 가능 수강권 보유 여부
+        const all: MemberRecord[] = [];
         for (let from = 0; ; from += PAGE) {
+          // 사용횟수는 여기서 거르지 않는다 — 사람 단위 합계라 아래에서 personTotals 로 건다.
           let query = sb.from(TABLE).select('이름,연락처,잔여횟수,수강권종료일');
           const term = sanitizeSearchTerm(q);
           if (term) query = query.or(SEARCH_COLS.map((c) => `${c}.ilike.%${term}%`).join(','));
           for (const c of FILTER_COLS) if (filters[c]) query = query.eq(c, filters[c]);
           if (branch) query = query.ilike(BRANCH_SRC_COL, `%${branch}%`);
-          if (usedMin !== '' && !isNaN(Number(usedMin))) query = query.gte(USED_COUNT, Number(usedMin));
-          if (usedMax !== '' && !isNaN(Number(usedMax))) query = query.lte(USED_COUNT, Number(usedMax));
           const { data, error } = await query.range(from, from + PAGE - 1);
           if (error) throw error;
           const chunk = (data as unknown as MemberRecord[]) || [];
-          for (const r of chunk) {
-            const k = personKey(r);
-            activeByPerson.set(k, (activeByPerson.get(k) || false) || isUsableTicket(r));
-          }
+          all.push(...chunk);
           if (chunk.length < PAGE || from + PAGE >= 50000) break;
         }
         if (!alive) return;
+        if (usedFilterOn && (!personTotals || !personKeyOf)) return; // 인덱스 준비되면 다시 계산
+        // 전 행을 다 모은 뒤에 1인 단위로 묶는다 — 지점이 달라도 이름+연락처가 같으면 한 사람.
+        // (연락처 빈 행을 붙이려면 이름별 연락처 목록이 필요해서 청크 단위로는 못 한다)
+        const keyOf = personKeyOf ?? makePersonResolver(all);
+        const activeByPerson = new Map<string, boolean>(); // 사람 → 사용 가능 수강권 보유 여부
+        for (const r of all) {
+          const k = keyOf(r);
+          if (usedFilterOn && personTotals) {
+            const t = personTotals.get(k) ?? 0;
+            if (minN !== null && t < minN) continue;
+            if (maxN !== null && t > maxN) continue;
+          }
+          activeByPerson.set(k, (activeByPerson.get(k) || false) || isUsableTicket(r));
+        }
         let activeN = 0;
         for (const a of activeByPerson.values()) if (a) activeN++;
         const totalN = activeByPerson.size;
@@ -140,7 +247,7 @@ export default function Members() {
       alive = false;
       clearTimeout(t);
     };
-  }, [q, filters, branch, usedMin, usedMax]);
+  }, [q, filters, branch, usedFilterOn, minN, maxN, personTotals, personKeyOf]);
 
   // 필터 드롭다운 옵션: 저카디널리티 컬럼(성별·수강권종류)의 실제 값 목록을 한 번 수집
   useEffect(() => {
@@ -259,7 +366,7 @@ export default function Members() {
         </label>
 
         <label className="flex flex-col gap-1 text-[12px] text-muted">
-          사용횟수(전체−잔여)
+          사용횟수 <span className="text-[11px] text-primary">1인 합산 · 전 지점</span>
           <div className="flex items-center gap-[6px]">
             <input
               type="number"
@@ -324,6 +431,12 @@ export default function Members() {
                   {c} {sort === c && <span className="text-[11px] text-primary">{dir ? '▲' : '▼'}</span>}
                 </th>
               ))}
+              <th
+                className="sticky top-0 border-b border-border bg-[#f7f8fa] px-3 py-[11px] text-left font-semibold"
+                title="이 사람의 전 지점 사용횟수 합계 (이름+연락처가 같으면 동일인)"
+              >
+                총 사용횟수<span className="ml-1 text-[11px] font-normal text-muted">1인</span>
+              </th>
               <th className="sticky top-0 border-b border-border bg-[#f7f8fa] px-3 py-[11px] text-left font-semibold">
                 관리
               </th>
@@ -332,7 +445,7 @@ export default function Members() {
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={COLUMNS.length + 1}>
+                <td colSpan={COLUMNS.length + 2}>
                   <div className="p-10 text-center text-sm text-muted">
                     <span className={spinner} /> 불러오는 중…
                   </div>
@@ -340,13 +453,13 @@ export default function Members() {
               </tr>
             ) : loadError ? (
               <tr>
-                <td colSpan={COLUMNS.length + 1}>
+                <td colSpan={COLUMNS.length + 2}>
                   <div className="p-10 text-center text-sm text-muted">불러오기 실패: {loadError}</div>
                 </td>
               </tr>
             ) : !rows.length ? (
               <tr>
-                <td colSpan={COLUMNS.length + 1}>
+                <td colSpan={COLUMNS.length + 2}>
                   <div className="p-10 text-center text-sm text-muted">결과가 없습니다.</div>
                 </td>
               </tr>
@@ -358,6 +471,10 @@ export default function Members() {
                       {NUM_COLS.has(c) ? fmtNum(r[c]) : (r[c] ?? '')}
                     </td>
                   ))}
+                  {/* 이 행이 아니라 "이 사람"의 전 지점 합계 */}
+                  <td className="border-b border-[#eef0f4] px-3 py-[10px] font-semibold">
+                    {personTotals && personKeyOf ? fmtNum(personTotals.get(personKeyOf(r)) ?? 0) : '…'}
+                  </td>
                   <td className="border-b border-[#eef0f4] px-3 py-[10px]">
                     <div className="flex gap-[6px]">
                       <button className={btn.ghostSm} onClick={() => setEditRow(r)}>
@@ -397,6 +514,7 @@ export default function Members() {
             setEditRow(null);
             toast('수정되었습니다.');
             load();
+            setRefreshKey((k) => k + 1); // 횟수가 바뀌었을 수 있으니 1인 합산도 다시 계산
           }}
           onError={(m) => toast('수정 실패: ' + m, 'err')}
         />
@@ -409,6 +527,7 @@ export default function Members() {
             setDelRow(null);
             toast('삭제되었습니다.');
             load();
+            setRefreshKey((k) => k + 1); // 등록건이 사라졌으니 1인 합산도 다시 계산
           }}
           onError={(m) => toast('삭제 실패: ' + m, 'err')}
         />

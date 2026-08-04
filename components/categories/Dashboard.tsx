@@ -7,7 +7,8 @@ import {
   ymKey,
   ticketType,
   isTrial,
-  personKey,
+  makePersonResolver,
+  regDate,
   matchesBranch,
   BRANCHES,
   type MemberRecord,
@@ -85,7 +86,8 @@ export default function Dashboard() {
     (async () => {
       try {
         const [m, s, c] = await Promise.all([
-          fetchAllRows('이름,연락처,성별,수강권명,수강권종류,등록일,전체횟수,잔여횟수'),
+          // 수강권시작일 = 등록일이 빈 경우의 대체 기준(regDate). 둘 다 받아야 한다.
+          fetchAllRows('이름,연락처,성별,수강권명,수강권종류,등록일,수강권시작일,전체횟수,잔여횟수'),
           fetchAllRows('이름,연락처,수강권명,결제금액,결제일시', 50000, SALES_TABLE).catch(
             () => [] as MemberRecord[],
           ),
@@ -114,7 +116,7 @@ export default function Dashboard() {
       const mt = /^(\d{4})/.exec(String(v ?? ''));
       if (mt) set.add(Number(mt[1]));
     };
-    members?.forEach((r) => add(r['등록일']));
+    members?.forEach((r) => add(regDate(r)));
     sales.forEach((r) => add(r['결제일시']));
     costs.forEach((c) => add(c.연월));
     return Array.from(set).sort((a, b) => b - a);
@@ -123,10 +125,13 @@ export default function Dashboard() {
   // 지점별 지표
   const branchStats = useMemo<BranchStat[] | null>(() => {
     if (!members) return null;
+    // 지점이 달라도 이름+연락처가 같으면 한 사람 — 지점별 "총회원"은 그 지점에 등록건이
+    // 있는 사람 수를 센다(전 지점 공통 기준으로 묶은 뒤 세므로 사람 단위가 일관된다).
+    const keyOf = makePersonResolver(members, sales);
     return BRANCHES.map((b) => {
       const inBranch = members.filter((r) => matchesBranch(r, b));
-      const periodRegs = inBranch.filter((r) => inPeriod(ymKey(r['등록일']), period));
-      const persons = new Set(inBranch.map((r) => personKey(r)));
+      const periodRegs = inBranch.filter((r) => inPeriod(ymKey(regDate(r)), period));
+      const persons = new Set(inBranch.map((r) => keyOf(r)));
       const rev = sales
         .filter((r) => matchesBranch(r, b) && inPeriod(ymKey(r['결제일시']), period))
         .reduce((s, r) => s + money(r['결제금액']), 0);

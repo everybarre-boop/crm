@@ -67,8 +67,9 @@ to authenticated
 using      ( (auth.jwt() ->> 'email') = any (array['basegolf.official@gmail.com']) )
 with check ( (auth.jwt() ->> 'email') = any (array['basegolf.official@gmail.com']) );
 
--- 매칭 기준: 이름 + 수강권명 + 연락처(숫자만). dedup_key 재계산은 makeKey 공식과 동일.
+-- 매칭 기준: 이름 + 수강권명 + 연락처(숫자만).
 -- used_count 는 STORED 생성 컬럼이라 자동 재계산(직접 update 안 함).
+-- 2026-08: dedup_key 재계산 제거 — 새 KEY_COLS 에 전체/잔여횟수가 없어 갱신할 필요가 없다.
 -- SECURITY DEFINER 라 RLS 우회 → 함수 내부에서 관리자 이메일 재검증.
 create or replace function public.apply_attendance(
   records jsonb,
@@ -128,13 +129,7 @@ begin
     )
     update public.members mem
     set "전체횟수" = s.tot,
-        "잔여횟수" = s.rem,
-        dedup_key =
-             coalesce(mem."이름",     '') || chr(31)
-          || coalesce(mem."연락처",   '') || chr(31)
-          || coalesce(mem."수강권명", '') || chr(31)
-          || coalesce(mem."등록일",   '') || chr(31)
-          || coalesce(s.tot, '')
+        "잔여횟수" = s.rem
     from src s
     where mem."이름"     = s.nm
       and mem."수강권명" = s.ticket
@@ -175,14 +170,19 @@ select '2_members dedup_key 유니크 인덱스',
       and indexdef ilike '%dedup_key%' and indexdef ilike '%unique%'
   ) then '있음' else '없음(!)' end
 union all
+-- KEY_COLS(2026-08): 이름·연락처·수강권명·수강권시작일·결제구분·결제금액·결제일시·결제방법·할부개월수
 select '3_dedup_key 공식과 어긋난 행수',
   (select count(*)::text from public.members m
    where m.dedup_key is distinct from (
-          coalesce(m."이름",     '') || chr(31)
-       || coalesce(m."연락처",   '') || chr(31)
-       || coalesce(m."수강권명", '') || chr(31)
-       || coalesce(m."등록일",   '') || chr(31)
-       || coalesce(m."전체횟수", '')))
+          coalesce(m."이름",         '') || chr(31)
+       || coalesce(m."연락처",       '') || chr(31)
+       || coalesce(m."수강권명",     '') || chr(31)
+       || coalesce(m."수강권시작일", '') || chr(31)
+       || coalesce(m."결제구분",     '') || chr(31)
+       || coalesce(m."결제금액",     '') || chr(31)
+       || coalesce(m."결제일시",     '') || chr(31)
+       || coalesce(m."결제방법",     '') || chr(31)
+       || coalesce(m."할부개월수",   '')))
 union all
 select '4_branch_costs 테이블',
   case when exists (select 1 from information_schema.tables

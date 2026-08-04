@@ -3,7 +3,7 @@
 import { useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { sb } from '@/lib/supabase';
-import { TABLE, makeKey, canonicalColumn, type MemberRecord } from '@/lib/members';
+import { TABLE, KEY_COLS, makeKey, canonicalColumn, type MemberRecord } from '@/lib/members';
 import { SALES_TABLE, toSalesRecord } from '@/lib/sales';
 import { btn, card } from '@/components/ui/styles';
 
@@ -155,6 +155,19 @@ export default function Upload() {
           msg: `⚠️ ${f.name} — 연락처 값이 하나도 없습니다. 엑셀의 전화번호 컬럼명을 확인하세요(필요하면 별칭에 추가).`,
           kind: 'err',
         });
+      }
+      // 키 컬럼이 통째로 비어 있으면 서로 다른 등록건이 한 행으로 뭉개진다.
+      // (실제로 `등록일` 컬럼이 빠진 파일 때문에 사용횟수가 48% 누락된 적이 있다.)
+      if (toMembers) {
+        const emptyKeyCols = KEY_COLS.filter((c) => !hasAnyValue(crows, c));
+        if (emptyKeyCols.length) {
+          addLog({
+            msg:
+              `⚠️ ${f.name} — 중복 판정 키 컬럼(${emptyKeyCols.join(', ')})이 전부 비어 있습니다. ` +
+              `서로 다른 등록건이 하나로 합쳐져 사용횟수가 적게 집계될 수 있습니다. 내보내기 항목을 확인하세요.`,
+            kind: 'err',
+          });
+        }
       }
 
       // ── 회원(members) 저장 ──────────────────────────────────────────────
