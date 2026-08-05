@@ -14,7 +14,9 @@
     "db:pull": "drizzle-kit pull",
     "db:studio": "drizzle-kit studio",
     "db:backup": "node scripts/backup-table.mjs",
-    "daily": "node automation/run.mjs"
+    "db:sql": "node scripts/run-sql.mjs",
+    "daily": "node automation/run.mjs",
+    "test:rules": "node --test automation/test/rules.test.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",

@@ -116,7 +116,16 @@ npm run db:migrate   # 생성된 마이그레이션을 DB에 적용 (0000 베이
 npm run db:studio    # 로컬 GUI (drizzle studio)
 npm run db:backup            # sales 테이블 → CSV 덤프
 npm run db:backup members    # 다른 테이블 (여러 개 나열 가능)
+npm run db:sql sql/2026-08_crm.sql   # sql/ 마이그레이션 실행 (Supabase SQL Editor 대신)
 ```
+
+**`db:sql` — 700줄짜리 SQL 을 SQL Editor 에 복사·붙여넣기 하는 대신 쓴다.**
+[scripts/run-sql.mjs](scripts/run-sql.mjs)가 `DATABASE_URL` 로 붙어 실행한다(`db:backup` 과 같은
+"개발 도구 전용" 경로 — 클라이언트 번들과 무관, 접속 문자열은 에러 출력에서 마스킹).
+**실행 대상은 저장소의 `sql/*.sql` 로만 제한**한다 — 임의 경로 SQL 을 전권 연결로 돌리는 통로를
+만들지 않기 위함이다. 파일 하나가 **하나의 암묵 트랜잭션**이라 중간에 실패하면 그 파일 전체가
+롤백된다(반쯤 적용된 상태가 안 남는다). 파일 끝의 점검 SELECT 결과는 표로 출력된다.
+되돌리기 어려운 SQL 전에는 `db:backup` 을 먼저.
 
 **`db:backup` — 되돌리기 어려운 SQL 전에 반드시 실행할 것.** Supabase 무료 플랜에는
 대시보드 자동 백업(Database → Backups)이 없다. [scripts/backup-table.mjs](scripts/backup-table.mjs)가
@@ -141,6 +150,17 @@ CSV 는 Excel 열람을 전제하므로 `=` `+` `-` `@` 로 시작하는 셀 값
   (`{ id, label, icon, Component }`)로 하는 플러그인 구조.
 - [lib/members.ts](lib/members.ts) — `COLUMNS`/`KEY_COLS`/`makeKey` 등 스키마·상수.
   [lib/supabase.ts](lib/supabase.ts) — Supabase 클라이언트(공개 anon 키 포함).
+- **[shared/](shared/) — 앱과 자동화가 **같은 공식**을 쓰기 위한 순수 모듈.**
+  [shared/crm-core.mjs](shared/crm-core.mjs)(동일인 판정·횟수·날짜),
+  [shared/crm-rules.mjs](shared/crm-rules.mjs)(CRM 규칙 엔진). 타입은 손으로 쓴 `.d.mts`.
+  - ⛔️ **`shared/*.mjs` 에는 import 문이 하나도 없어야 한다**(crm-rules → crm-core 만 예외).
+    검사: `grep -n "^import\|require(" shared/*.mjs`. 의존성이 붙는 순간 앱 번들이 오염되거나
+    자동화가 브라우저 코드를 끌어온다.
+  - `lib/members.ts` 는 이 구현들을 **re-export 만** 한다 — 화면 코드는 지금까지처럼
+    `from '@/lib/members'` 를 쓰면 된다. 구현을 lib 로 되돌리지 말 것(자동화가 못 쓴다).
+- **[automation/](automation/) — 일간 CRM 자동화(Node/Playwright).** 아래 "일간 CRM 자동화" 참고.
+  - ⛔️ `app/`·`components/`·`lib/` 를 **import 금지**(클라이언트 번들 오염). 반대로
+    `automation/ → shared/*.mjs` 는 허용된다.
 - vendor 스크립트 없음. `@supabase/supabase-js`, `xlsx`는 npm 의존성으로 번들된다.
 - 백엔드 없음. Next.js가 정적 파일로 빌드한다(`output: 'export'`).
 
@@ -149,6 +169,9 @@ CSV 는 Excel 열람을 전제하므로 `=` `+` `-` `@` 로 시작하는 셀 값
 - 테이블: `public.members`(회원+수강권), `public.sales`(매출/결제). 둘 다 엑셀 헤더명이
   곧 DB 컬럼명이다(한글 컬럼). 회원 컬럼은 [lib/members.ts](lib/members.ts)의 `COLUMNS`,
   매출 컬럼은 [lib/sales.ts](lib/sales.ts)의 `SALES_COLUMNS`가 기준.
+  그 밖에 `branch_costs`(지점 비용), `daily_runs`(자동화 실행 로그), 그리고 CRM 자동화용
+  `reservations`·`crm_rules`·`crm_messages`·`crm_dormant`·`crm_slack_posts` 가 있다
+  (아래 "일간 CRM 자동화" 참고). Drizzle 짝은 [lib/db/schema.ts](lib/db/schema.ts).
 - **회원/매출 분리 업로드:** 업로드 화면은 회원 엑셀 **한 장**을 받아 컬럼만 나눈다 —
   회원 정보는 `members`, 결제 컬럼(`결제구분/결제금액/결제일시/결제방법/할부개월수`+식별정보)은
   `sales`로 각각 upsert. 저장 대상은 체크박스로 켜고 끌 수 있다(특정 대상만 저장 가능).
@@ -229,6 +252,59 @@ CSV 는 Excel 열람을 전제하므로 `=` `+` `-` `@` 로 시작하는 셀 값
   [sql/2026-07_sales_and_used_count.sql](sql/2026-07_sales_and_used_count.sql)을
   Supabase SQL Editor에서 실행해 반영한다(idempotent). 이 SQL을 돌리기 전에는
   사용횟수 필터/매출 업로드가 동작하지 않는다.
+
+## 일간 CRM 자동화 (2026-08)
+
+매일 21:00 KST GitHub Actions 1회 실행 → 어제 출석 반영 → 내일 예약자 명단 → CRM 규칙 →
+지점별 슬랙 발송. 피드백은 관리자 페이지에서 받는다.
+**운영 매뉴얼(슬랙 앱·Secrets·장애 대응·규칙 표)은 [docs/CRM-SLACK.md](docs/CRM-SLACK.md).**
+
+- **선행 SQL(순서 고정):** [sql/2026-08_apply_attendance_v2.sql](sql/2026-08_apply_attendance_v2.sql)
+  → [sql/2026-08_crm.sql](sql/2026-08_crm.sql) → [sql/2026-08_verify_crm.sql](sql/2026-08_verify_crm.sql).
+  실행 전 `npm run db:backup members` · `npm run db:backup sales`.
+- 🔥 **`apply_attendance` v1 은 재등록 다중행을 전부 덮어썼다.** 매칭이
+  `이름+수강권명+연락처` 3열이었는데, 2026-08 `KEY_COLS` 개정 이후 **같은 사람의 같은 수강권
+  재등록 건이 각각 별개 행**이라(이가원 `언리미티드(판교) 30회` 19행) 그 19행이 전부 같은
+  전체/잔여로 덮였다 → `used_count` 합(=1인 누적)이 왜곡되고 `matched > requested` 가 됐다.
+  v2 는 입력 1건당 members **1행만** 고른다(수강권시작일 정확 일치 → 최신 등록건 순).
+  v1(3인자) 함수는 **삭제**한다 — 남겨 두면 3인자 호출이 양쪽에 매칭돼 `is not unique` 에러다.
+- **`reservations.res_key` 불변식** = `지점 ⋮ 예약일자 ⋮ 수업시간 ⋮ 수업명 ⋮ 이름 ⋮ 숫자연락처`
+  (`⋮` = chr(31)). `dedup_key` 와 **같은 원칙** — `예약상태`·`수강권명`·`강사`는 재실행 때
+  값이 변하므로(예약→출석) 키에 넣지 않는다. 키 참여 컬럼은 전부 `not null default ''`
+  (하나라도 NULL 이면 unique index 에서 NULL≠NULL 이라 재실행마다 새 행이 쌓인다).
+  **공식은 `_norm_reservations` RPC 안에만 있다** — JS 로 다시 구현하지 말 것.
+- **`reservations` 는 하루 300~800행씩 쌓인다.** 클라이언트에서 `fetchAllRows` 로 전량 스캔
+  **금지**. 항상 `.gte/.lte('예약일자')` 로 끊는다. CRM 실행 화면은 아예 안 읽는다(야간 잡이
+  `crm_messages` 에 결과를 미리 써 두기 때문 — 이게 성능을 지키는 핵심이다).
+- **뷰는 반드시 `with (security_invoker = on)`.** 없으면 뷰가 소유자 권한으로 돌아 **RLS 를
+  우회**한다 — anon 이 뷰로 회원 PII 를 읽는 경로가 생긴다.
+- **슬랙은 발송 전용(outbound only)이다.** 버튼 응답을 받으려면 HTTP 엔드포인트가 필요한데
+  서버를 도입하면 정적 export + RLS 모델이 통째로 바뀐다. 피드백은 `crm_messages` 의 인라인
+  컬럼(`실행여부`/`반응`/`메모`)에 관리자 화면에서만 쓴다.
+  - 🔐 **슬랙에 나가는 PII 는 "이름 + 수업 정보"까지.** 연락처·생년월일·결제금액 금지
+    (채널 인원이 회원 DB 접근 권한자보다 넓다). 운영 알림에는 **건수만** — 미매칭 로그에는
+    실명이 섞인다. `automation/out/*.json` 은 커밋·artifact 업로드 금지.
+  - Slack Web API 는 **실패해도 HTTP 200** 을 준다. 반드시 본문의 `ok:false` 를 검사할 것.
+- **`crm_messages.연락처`를 반드시 채운다.** 이 테이블에는 `dedup_key` 가 없어서, 연락처가
+  비면 `makePersonResolver` 폴백이 행 단위 일련번호로 떨어져 `sales` 와 절대 안 붙는다
+  → CRM 성과 화면의 결제 전환 계산이 통째로 무너진다.
+- **재실행 멱등성** — 21:00 실패 후 22:00 재실행이 안전해야 한다. 마일스톤 억제 조회에는
+  반드시 `대상일자 <> targetDate` 를 넣는다. 없으면 1차 실행에서 발송된 **자기 자신**이 억제
+  근거가 되어 재실행 때 메시지가 통째로 사라진다.
+- **`DRY_RUN` 은 엄격 파싱한다**(`parseBool`). 옛 코드는 `!== 'false'` 라서 `DRY_RUN=1`·오타가
+  전부 조용히 `true`(=아무것도 안 함)가 됐다 — 밤새 아무 일도 없었는데 아침에 초록불만 남았다.
+- **스크래퍼 셀렉터는 [automation/studiomate/selectors.mjs](automation/studiomate/selectors.mjs)
+  한 파일에만 둔다.** `scrape.mjs` 는 필드맵을 순회할 뿐 셀렉터를 모른다. 값은 문자열(CSS)/
+  함수/`null`(미설정) 셋 다 되고, `null` 이면 그 필드만 비고 경고가 뜬다 — 한 번에 다 채우지
+  않아도 파이프라인을 돌려볼 수 있다.
+- **전 지점 스크랩 실패는 fatal 이다.** 로그인 실패를 "예약자 0명"으로 오해하면 아무 일도 안
+  일어난 채 초록불만 남는다(옛 `run.mjs` 의 실제 문제). 1~2지점 실패는 나머지 진행 + `exit 1`.
+- **규칙 변경 시 [automation/test/rules.test.mjs](automation/test/rules.test.mjs)가 먼저 깨져야
+  한다.** `npm run test:rules`(DB 불필요, 수 초). 경계값(정확히 100회/99회, 7일/8일,
+  잔여 30%/29%, 재실행 멱등)을 고정해 둔 자리다.
+- **"14일 미방문"은 예약 스냅샷 이력이 쌓여야 나온다.** 관측일수 < 14 면 규칙이 자동으로
+  잠기고 화면에 배너가 뜬다. 관측된 적 없는 회원은 "미방문"이 아니라 **"모름"**으로 표기한다
+  (`경과일추정`). 여기서 추정치를 지어내지 말 것 — `used_count` 만으로는 "언제" 썼는지 모른다.
 
 ## 코딩 규칙
 

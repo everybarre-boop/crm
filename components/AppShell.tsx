@@ -11,7 +11,9 @@ export default function AppShell({ user }: { user: User }) {
 
   useEffect(() => {
     const fromHash = () => {
-      const id = location.hash.slice(1);
+      // 슬랙 메시지의 딥링크(#crm?date=2026-08-06)를 받기 위해 쿼리를 잘라낸다.
+      // 이게 없으면 쿼리가 붙는 순간 대시보드로 튕긴다.
+      const id = location.hash.slice(1).split('?')[0];
       setActiveId(CATEGORIES.some((c) => c.id === id) ? id : CATEGORIES[0].id);
     };
     fromHash();

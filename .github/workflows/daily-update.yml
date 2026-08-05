@@ -1,20 +1,36 @@
 # ============================================================================
-# 에블바레 — 일간 회원 사용횟수 자동 갱신
+# 에블바레 — 일간 CRM 자동화 (매일 21:00 KST)
 # ----------------------------------------------------------------------------
-# 스튜디오메이트 당일 예약자의 전체/잔여를 스크랩해 members 에 반영한다.
-# PC 가 꺼져 있어도 GitHub 클라우드에서 매일 실행된다.
+# 한 번의 실행이 다음을 순서대로 한다:
+#   ① 어제(D-1) 출석/결석 확정 스크랩 → members 사용횟수 반영 + 예약 스냅샷 확정
+#   ② 내일(D+1) 지점별 예약자 명단 스크랩 → 예약 스냅샷 저장
+#   ③ CRM 규칙 평가 → crm_messages / crm_dormant
+#   ④ 지점별 슬랙 채널에 통합 메시지 1건 발송
+#   ⑤ 실패하면 운영 채널로 알림
 #
 # 보안: service_role 키를 쓰지 않는다. 관리자 계정으로 로그인해 RLS 안에서 동작한다.
 #       비밀값은 저장소가 아니라 GitHub → Settings → Secrets and variables → Actions 에 둔다.
 #
-# 필요한 Secrets:
-#   SUPABASE_URL, SUPABASE_ANON_KEY   (공개값이지만 Secrets 로 주입)
-#   ADMIN_EMAIL, ADMIN_PASSWORD       (관리자 계정 — 비밀)
-#   STUDIOMATE_EMAIL, STUDIOMATE_PASSWORD
-#   SM_SLUG_GWANGGYO 등 지점별 slug (필요 시)
+# ⚠️ automation/out/*.json 에는 회원 실명이 들어간다 — **artifact 로 업로드하지 말 것.**
+#    저장소 권한자 전원이 내려받을 수 있게 된다.
 #
-# ⚠️ 처음엔 아래 schedule 을 주석 유지하고 workflow_dispatch(수동)로 DRY_RUN=true 며칠
-#    돌려 미매칭 로그를 확인한 뒤, 안정되면 schedule 주석을 풀고 DRY_RUN 을 false 로.
+# ⚠️ GitHub 의 schedule 은 정각을 보장하지 않는다(부하 시간대엔 수십 분 지연, 드물게 스킵).
+#    21:00 은 마지막 수업이 끝난 뒤라 지연에 관대하지만, 정확한 시각이 필요해지면 외부
+#    스케줄러(cron-job.org → workflow_dispatch API)를 붙여야 한다.
+#
+# 필요한 Secrets (20개):
+#   SUPABASE_URL, SUPABASE_ANON_KEY          공개값이지만 Secrets 로 주입
+#   ADMIN_EMAIL, ADMIN_PASSWORD              관리자 계정 — 비밀
+#   STUDIOMATE_EMAIL, STUDIOMATE_PASSWORD
+#   SM_SLUG_{CHEONGDAM,OKSU,GWANGGYO,BANPO,PANGYO,SONGPA}
+#   SLACK_BOT_TOKEN                          xoxb-… (스코프: chat:write, chat:write.public)
+#   SLACK_CHANNEL_{CHEONGDAM,OKSU,GWANGGYO,BANPO,PANGYO,SONGPA}
+#   SLACK_CHANNEL_OPS                        실패 알림 채널
+#   ⚠️ 채널 값은 이름(#광교)이 아니라 **채널 ID(C0123ABCD)** 를 넣는다. 이름은 바뀌면
+#      조용히 실패하고, 그러면 그 지점만 CRM 이 끊긴다.
+#
+# 전환 순서: workflow_dispatch + dry_run=true 로 3~5일 관찰(미매칭률·슬랙 프리뷰 검수)
+#            → dry_run=false 수동 1회 → 아래 schedule 주석 해제
 # ============================================================================
 name: daily-update
 
@@ -22,11 +38,19 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: '반영 없이 매칭만 확인(dry-run)'
+        description: '반영/발송 없이 매칭·멘트만 확인(dry-run)'
         type: boolean
         default: true
+      target_date:
+        description: 'D+1 을 강제 (YYYY-MM-DD). 비우면 자동'
+        type: string
+        default: ''
+      steps:
+        description: '부분 실행 (예: roster,crm). 비우면 전체'
+        type: string
+        default: ''
   # schedule:
-  #   - cron: '0 14 * * *'   # UTC 14:00 = KST 23:00 (당일 수업 종료 후). 검증 끝난 뒤 주석 해제.
+  #   - cron: '0 12 * * *'   # UTC 12:00 = KST 21:00. 검증이 끝난 뒤 주석 해제.
 
 concurrency:
   group: daily-update
@@ -35,22 +59,40 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30 # 6지점 × 2모드(attendance/roster)
     env:
+      TZ: Asia/Seoul # 로그 타임스탬프 가독성용. 날짜 계산은 dateKST() 가 따로 한다.
+
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
       ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
       ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
       STUDIOMATE_EMAIL: ${{ secrets.STUDIOMATE_EMAIL }}
       STUDIOMATE_PASSWORD: ${{ secrets.STUDIOMATE_PASSWORD }}
+
       SM_SLUG_CHEONGDAM: ${{ secrets.SM_SLUG_CHEONGDAM }}
       SM_SLUG_OKSU: ${{ secrets.SM_SLUG_OKSU }}
       SM_SLUG_GWANGGYO: ${{ secrets.SM_SLUG_GWANGGYO }}
       SM_SLUG_BANPO: ${{ secrets.SM_SLUG_BANPO }}
       SM_SLUG_PANGYO: ${{ secrets.SM_SLUG_PANGYO }}
       SM_SLUG_SONGPA: ${{ secrets.SM_SLUG_SONGPA }}
-      # 수동 실행 시 입력값, 스케줄 실행 시 false(반영)
-      DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SLACK_CHANNEL_CHEONGDAM: ${{ secrets.SLACK_CHANNEL_CHEONGDAM }}
+      SLACK_CHANNEL_OKSU: ${{ secrets.SLACK_CHANNEL_OKSU }}
+      SLACK_CHANNEL_GWANGGYO: ${{ secrets.SLACK_CHANNEL_GWANGGYO }}
+      SLACK_CHANNEL_BANPO: ${{ secrets.SLACK_CHANNEL_BANPO }}
+      SLACK_CHANNEL_PANGYO: ${{ secrets.SLACK_CHANNEL_PANGYO }}
+      SLACK_CHANNEL_SONGPA: ${{ secrets.SLACK_CHANNEL_SONGPA }}
+      SLACK_CHANNEL_OPS: ${{ secrets.SLACK_CHANNEL_OPS }}
+
+      # ⚠️ 예전에는 `inputs.dry_run || 'false'` 였다. schedule 실행에는 inputs 자체가 없어서
+      #    폴백에 의존했는데, 그러면 "왜 반영 모드인지"가 코드에 안 드러난다.
+      #    이벤트로 명시 분기한다 — schedule = 반영, 수동 = 입력값.
+      DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }}
+      TARGET_DATE: ${{ inputs.target_date }}
+      STEPS: ${{ inputs.steps }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
 
@@ -65,5 +107,15 @@ jobs:
       - name: Install Playwright browser
         run: npx playwright install --with-deps chromium
 
-      - name: Run daily update
+      # 규칙 경계값 회귀 테스트(수 초). 규칙이 깨진 채로 6개 채널에 뿌리는 걸 막는다.
+      - name: Test CRM rules
+        run: npm run test:rules
+
+      - name: Run daily CRM automation
         run: node automation/run.mjs
+
+      # run.mjs 자체가 죽는 경우(설치 실패·timeout·OOM)를 위한 마지막 그물.
+      # run.mjs 가 이미 알렸으면 automation/out/.notified 마커를 보고 건너뛴다.
+      - name: Notify failure
+        if: failure()
+        run: node automation/notify.mjs "워크플로 실패 (러너/설치 단계 포함 가능)"

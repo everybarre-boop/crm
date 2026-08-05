@@ -14,7 +14,18 @@
       키를 이루는 컬럼 목록은 DB가 아니라 lib/members.ts 의 KEY_COLS 가 기준이다
       (값은 앱이 계산해서 넣고, DB는 유니크 제약으로 덮어쓰기를 보장하는 역할만 한다).
    ====================================================================== */
-import { pgTable, pgPolicy, bigint, integer, text, jsonb, timestamp, unique } from 'drizzle-orm/pg-core';
+import {
+  pgTable,
+  pgPolicy,
+  bigint,
+  boolean,
+  date,
+  integer,
+  text,
+  jsonb,
+  timestamp,
+  unique,
+} from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 // 관리자 이메일 화이트리스트 (members·sales 공통 RLS). 유일한 PII 방어선. (CLAUDE.md 참고)
@@ -124,6 +135,218 @@ export const sales = pgTable(
     dedupKey: text('dedup_key').unique(),
     raw: jsonb(),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow(),
+  },
+  () => [
+    pgPolicy('admins_full_access', {
+      as: 'permissive',
+      for: 'all',
+      to: ['authenticated'],
+      using: adminOnly,
+      withCheck: adminOnly,
+    }),
+  ],
+);
+
+/* ======================================================================
+   일간 CRM 자동화 테이블 (sql/2026-08_crm.sql 과 짝)
+   ----------------------------------------------------------------------
+   ⚠️ 운영 반영은 sql/ 의 손수 작성 SQL 로 한다. 여기 정의는 `npm run db:pull` 대조용
+      짝맞춤이다(생성 컬럼·부분 인덱스·RPC·뷰까지 Drizzle 로 표현하지는 않는다).
+   ====================================================================== */
+
+/* 예약 스냅샷. 하루 300~800행씩 쌓인다 — 클라이언트 전량 스캔 금지(예약일자로 끊을 것).
+   자연키 res_key = 지점⋮예약일자⋮수업시간⋮수업명⋮이름⋮숫자연락처 (⋮=chr(31)).
+   ⛔️ 예약상태·수강권명·강사는 재실행 때 값이 변하므로 키에 넣지 않는다(dedup_key 와 같은 원칙). */
+export const reservations = pgTable(
+  'reservations',
+  {
+    id: bigint({ mode: 'bigint' }).primaryKey().generatedAlwaysAsIdentity(),
+    지점: text('지점').notNull().default(''),
+    예약일자: date('예약일자').notNull(),
+    수업시간: text('수업시간').notNull().default(''),
+    수업명: text('수업명').notNull().default(''),
+    강사: text('강사').notNull().default(''),
+    이름: text('이름').notNull().default(''),
+    연락처: text('연락처').notNull().default(''),
+    수강권명: text('수강권명').notNull().default(''),
+    예약상태: text('예약상태').notNull().default('예약'), // 예약|출석|결석|노쇼|취소|기타
+    전체횟수: text('전체횟수'),
+    잔여횟수: text('잔여횟수'),
+    수강권시작일: text('수강권시작일'),
+    수강권종료일: text('수강권종료일'),
+    // shared/crm-core.mjs 의 personKey() 와 같은 공식
+    personKey: text('person_key').generatedAlwaysAs(
+      sql`(btrim("이름") || chr(31) || regexp_replace("연락처", '[^0-9]'::text, ''::text, 'g'::text))`,
+    ),
+    resKey: text('res_key').notNull().unique(),
+    source: text('source').notNull().default('studiomate'),
+    raw: jsonb(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow(),
+  },
+  () => [
+    pgPolicy('admins_full_access', {
+      as: 'permissive',
+      for: 'all',
+      to: ['authenticated'],
+      using: adminOnly,
+      withCheck: adminOnly,
+    }),
+  ],
+);
+
+/* 규칙 + 멘트 템플릿. 관리자 화면(CRM 성과 → 템플릿 편집)에서 수정한다.
+   seed 는 on conflict do nothing 이라 SQL 재실행이 편집분을 되돌리지 않는다. */
+export const crmRules = pgTable(
+  'crm_rules',
+  {
+    id: text('id').primaryKey(), // milestone|trial|first-paid|expiring|dormant-14
+    라벨: text('라벨').notNull(),
+    이모지: text('이모지').notNull().default(''),
+    활성: boolean('활성').notNull().default(true),
+    슬랙발송: boolean('슬랙발송').notNull().default(true),
+    정렬순서: integer('정렬순서').notNull().default(0),
+    재발송억제일수: integer('재발송억제일수').notNull().default(0), // 0=없음, -1=평생 1회
+    파라미터: jsonb('파라미터').notNull().default({}),
+    템플릿: text('템플릿').notNull().default(''),
+    예시멘트: text('예시멘트').notNull().default(''),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow(),
+  },
+  () => [
+    pgPolicy('admins_full_access', {
+      as: 'permissive',
+      for: 'all',
+      to: ['authenticated'],
+      using: adminOnly,
+      withCheck: adminOnly,
+    }),
+  ],
+);
+
+/* 생성된 멘트 + 슬랙 발송 결과 + **강사 피드백(인라인 컬럼)**.
+   피드백을 별도 테이블로 두지 않는 이유: "미입력만 보기"가 .is('실행여부',null) 한 줄이 되고,
+   일괄 체크가 .update().in('id',ids) 1회로 끝난다. 나중에 강사 계정을 붙일 때는
+   컬럼 단위 GRANT(grant update (실행여부,반응,메모))로 열면 된다. */
+export const crmMessages = pgTable(
+  'crm_messages',
+  {
+    id: bigint({ mode: 'bigint' }).primaryKey().generatedAlwaysAsIdentity(),
+    대상일자: date('대상일자').notNull(),
+    지점: text('지점').notNull().default(''),
+    ruleId: text('rule_id').notNull(),
+    규칙키: text('규칙키').notNull().default(''),
+    personKey: text('person_key').notNull(),
+    이름: text('이름').notNull().default(''),
+    // ⚠️ 반드시 채운다. 비면 makePersonResolver 폴백이 행 단위 키로 떨어져 sales 와 안 붙고,
+    //    CRM 성과 화면의 결제 전환 계산이 통째로 무너진다.
+    연락처: text('연락처').notNull().default(''),
+    수업시간: text('수업시간').notNull().default(''),
+    수업명: text('수업명').notNull().default(''),
+    강사: text('강사').notNull().default(''),
+    수강권명: text('수강권명').notNull().default(''),
+    멘트: text('멘트').notNull().default(''),
+    예시멘트: text('예시멘트').notNull().default(''),
+    근거: jsonb('근거').notNull().default({}),
+    발송여부: boolean('발송여부').notNull().default(false),
+    발송시각: timestamp('발송시각', { withTimezone: true, mode: 'string' }),
+    slackTs: text('slack_ts'),
+    발송오류: text('발송오류'),
+    실행여부: boolean('실행여부'), // NULL = 아직 미입력
+    반응: text('반응'), // 좋음|보통|무반응|부정
+    메모: text('메모'),
+    피드백작성자: text('피드백작성자'),
+    피드백시각: timestamp('피드백시각', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow(),
+  },
+  (t) => [
+    unique().on(t.대상일자, t.지점, t.personKey, t.ruleId, t.규칙키),
+    pgPolicy('admins_full_access', {
+      as: 'permissive',
+      for: 'all',
+      to: ['authenticated'],
+      using: adminOnly,
+      withCheck: adminOnly,
+    }),
+  ],
+);
+
+/* 14일 미방문 — 사람당 1행.
+   일자별 이력으로 쌓으면 300명 × 365일 = 연 10만 행인데 화면은 "오늘 것"만 본다.
+   ⚠️ upsert payload 에 최초감지일을 넣지 말 것 — 넣으면 매일 덮여서 "얼마나 오래 휴면인지"를 잃는다. */
+export const crmDormant = pgTable(
+  'crm_dormant',
+  {
+    personKey: text('person_key').primaryKey(),
+    이름: text('이름').notNull().default(''),
+    연락처: text('연락처').notNull().default(''),
+    마지막출석일: date('마지막출석일'), // null = 관측 이력 없음(= "모름")
+    마지막지점: text('마지막지점').notNull().default(''),
+    경과일: integer('경과일').notNull().default(0),
+    잔여합: integer('잔여합').notNull().default(0),
+    보유수강권: jsonb('보유수강권').notNull().default([]),
+    최초감지일: date('최초감지일').notNull().default(sql`CURRENT_DATE`),
+    갱신일: date('갱신일').notNull().default(sql`CURRENT_DATE`),
+    조치여부: boolean('조치여부'),
+    조치메모: text('조치메모'),
+    조치작성자: text('조치작성자'),
+    조치시각: timestamp('조치시각', { withTimezone: true, mode: 'string' }),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow(),
+  },
+  () => [
+    pgPolicy('admins_full_access', {
+      as: 'permissive',
+      for: 'all',
+      to: ['authenticated'],
+      using: adminOnly,
+      withCheck: adminOnly,
+    }),
+  ],
+);
+
+/* 지점·일자별 슬랙 메시지 1건. unique 가 중복 발송 방지 + chat.update 의 근거다. */
+export const crmSlackPosts = pgTable(
+  'crm_slack_posts',
+  {
+    id: bigint({ mode: 'bigint' }).primaryKey().generatedAlwaysAsIdentity(),
+    대상일자: date('대상일자').notNull(),
+    지점: text('지점').notNull(),
+    종류: text('종류').notNull().default('daily'),
+    channelId: text('channel_id').notNull().default(''),
+    messageTs: text('message_ts'),
+    건수: integer('건수').notNull().default(0),
+    상태: text('상태').notNull().default('pending'), // pending|ok|failed|skipped
+    에러: text('에러'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow(),
+  },
+  (t) => [
+    unique().on(t.대상일자, t.지점, t.종류),
+    pgPolicy('admins_full_access', {
+      as: 'permissive',
+      for: 'all',
+      to: ['authenticated'],
+      using: adminOnly,
+      withCheck: adminOnly,
+    }),
+  ],
+);
+
+/* 자동화 실행 로그. RPC(apply_attendance·save_reservations)와 클라이언트(crm·slack)가 함께 쓴다.
+   sql/2026-07_apply_attendance.sql 에서 만들어졌고 v2 에서 단계·대상일자가 추가됐다. */
+export const dailyRuns = pgTable(
+  'daily_runs',
+  {
+    id: bigint({ mode: 'bigint' }).primaryKey().generatedAlwaysAsIdentity(),
+    runAt: timestamp('run_at', { withTimezone: true, mode: 'string' }).defaultNow(),
+    단계: text('단계').notNull().default('attendance'), // attendance|reservations|crm|slack
+    대상일자: date('대상일자'),
+    지점: text('지점'),
+    dryRun: boolean('dry_run').notNull().default(true),
+    요청건수: integer('요청건수').notNull().default(0),
+    반영건수: integer('반영건수').notNull().default(0),
+    미매칭: jsonb('미매칭').notNull().default([]),
+    createdBy: text('created_by'),
   },
   () => [
     pgPolicy('admins_full_access', {

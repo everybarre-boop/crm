@@ -16,9 +16,63 @@ import {
 import { SALES_TABLE } from '@/lib/sales';
 import { COSTS_TABLE, type BranchCost } from '@/lib/costs';
 import { defaultPeriod, inPeriod, periodLabel, type Period } from '@/lib/period';
+import {
+  CRM_DORMANT_TABLE,
+  CRM_MSG_TABLE,
+  RUNS_TABLE,
+  addDays,
+  sinceText,
+  todayStr,
+} from '@/lib/crm';
 import PeriodPicker from '@/components/ui/PeriodPicker';
 import { sb } from '@/lib/supabase';
 import { card, spinner } from '@/components/ui/styles';
+
+type CrmChips = {
+  sent: number | null;
+  pending: number | null;
+  dormant: number | null;
+  lastRun: string | null;
+};
+
+/* 대시보드 상단 "오늘의 CRM" 스트립 — 클릭하면 해당 화면으로 간다.
+   대시보드는 월 단위 회고, CRM 은 오늘의 작업이라 성격이 달라 표/차트는 건드리지 않고
+   칩 4개만 얹는다. */
+function CrmStrip({ crm }: { crm: CrmChips | null }) {
+  const stale = crm?.lastRun ? Date.now() - new Date(crm.lastRun).getTime() > 24 * 3600 * 1000 : true;
+  const items: Array<{ label: string; value: string; to: string; danger?: boolean }> = [
+    { label: '오늘·내일 발송 멘트', value: crm?.sent == null ? '—' : `${crm.sent}건`, to: 'crm' },
+    { label: '피드백 미입력', value: crm?.pending == null ? '—' : `${crm.pending}건`, to: 'crm' },
+    { label: '관리 필요(미방문)', value: crm?.dormant == null ? '—' : `${crm.dormant}명`, to: 'crm' },
+    {
+      label: '마지막 자동화 실행',
+      value: sinceText(crm?.lastRun),
+      to: 'automation',
+      danger: stale && !!crm,
+    },
+  ];
+  return (
+    <div className="mb-[18px] grid grid-cols-2 gap-[14px] sm:grid-cols-4">
+      {items.map((it) => (
+        <button
+          key={it.label}
+          onClick={() => {
+            location.hash = it.to;
+          }}
+          className={[
+            'cursor-pointer rounded-[14px] border p-[14px] text-left transition-colors',
+            it.danger ? 'border-danger bg-danger-soft' : 'border-border bg-card hover:bg-[#fafbfc]',
+          ].join(' ')}
+        >
+          <div className="text-[12px] text-muted">{it.label}</div>
+          <div className={`mt-1 text-[19px] font-bold ${it.danger ? 'text-danger' : ''}`}>
+            {it.value}
+          </div>
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function money(v: unknown): number {
   return Number(String(v ?? '').replace(/[^0-9.-]/g, '')) || 0;
@@ -79,6 +133,39 @@ export default function Dashboard() {
 
   const [period, setPeriod] = useState<Period>(defaultPeriod());
   const [chartBranch, setChartBranch] = useState('');
+  const [crm, setCrm] = useState<CrmChips | null>(null);
+
+  /* "오늘의 CRM" 칩 — 기존 members/sales/costs 로딩과 완전히 독립된 effect.
+     count:'exact' + head:true 라 **행을 한 줄도 안 받는다** → 대시보드 초기 로딩에
+     붙는 비용이 사실상 0. CRM 테이블이 아직 없어도 대시보드가 죽지 않게 전부 삼킨다. */
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const d = todayStr();
+      const tomorrow = addDays(d, 1);
+      const q = () => sb.from(CRM_MSG_TABLE).select('id', { count: 'exact', head: true });
+      try {
+        const [sent, pending, dormant, run] = await Promise.all([
+          q().gte('대상일자', d).lte('대상일자', tomorrow).eq('발송여부', true),
+          q().gte('대상일자', d).lte('대상일자', tomorrow).eq('발송여부', true).is('실행여부', null),
+          sb.from(CRM_DORMANT_TABLE).select('person_key', { count: 'exact', head: true }),
+          sb.from(RUNS_TABLE).select('run_at').order('run_at', { ascending: false }).limit(1),
+        ]);
+        if (!alive) return;
+        setCrm({
+          sent: sent.count ?? null,
+          pending: pending.count ?? null,
+          dormant: dormant.count ?? null,
+          lastRun: run.data?.[0]?.run_at ?? null,
+        });
+      } catch {
+        if (alive) setCrm({ sent: null, pending: null, dormant: null, lastRun: null });
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // members·sales·costs 를 한 번씩 모두 읽어 두고(비용 테이블은 작다) 기간 필터는 클라이언트에서.
   useEffect(() => {
@@ -202,6 +289,9 @@ export default function Dashboard() {
         <h2 className="m-0 mb-1 text-[22px]">대시보드</h2>
         <p className="m-0 text-[13px] text-muted">지점별 월간 운영 지표 · 매출 대비 비용 비율.</p>
       </div>
+
+      {/* 오늘의 CRM (기간 선택과 무관 — 오늘 해야 할 일) */}
+      <CrmStrip crm={crm} />
 
       {/* 기간 선택 (년/반기/분기/월) */}
       <div className="mb-[18px] flex flex-wrap items-end gap-[14px] rounded-xl border border-border bg-[#f7f8fa] px-[14px] py-3">

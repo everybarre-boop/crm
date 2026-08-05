@@ -24,14 +24,18 @@ export async function getAdminClient() {
   return sb;
 }
 
-// records: [{ 이름, 연락처, 수강권명, 전체횟수, 잔여횟수 }, ...]
-export async function applyAttendance(records, { dryRun, branch }) {
+/* records: [{ 이름, 연락처, 수강권명, 전체횟수, 잔여횟수, 수강권시작일? }, ...]
+   ⚠️ 수강권시작일을 같이 보내면 v2 RPC 가 "재등록 여러 행 중 어느 행인지"를 정확히 고른다.
+      없으면 가장 최근 등록건으로 폴백한다. (sql/2026-08_apply_attendance_v2.sql) */
+export async function applyAttendance(records, { dryRun, branch, targetDate = null }) {
   const sb = await getAdminClient();
   const { data, error } = await sb.rpc('apply_attendance', {
     records,
     dry_run: dryRun,
     branch,
+    target_date: targetDate,
   });
   if (error) throw new Error(`apply_attendance 실패(${branch}): ${error.message}`);
-  return data; // { requested, matched, unmatched_count, dry_run, branch, unmatched }
+  // { requested, matched, updated, unmatched_count, dry_run, branch, target_date, unmatched }
+  return data;
 }
