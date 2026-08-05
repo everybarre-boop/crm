@@ -87,8 +87,11 @@ export default function Dashboard() {
       try {
         const [m, s, c] = await Promise.all([
           // 수강권시작일 = 등록일이 빈 경우의 대체 기준(regDate). 둘 다 받아야 한다.
-          fetchAllRows('이름,연락처,성별,수강권명,수강권종류,등록일,수강권시작일,전체횟수,잔여횟수'),
-          fetchAllRows('이름,연락처,수강권명,결제금액,결제일시', 50000, SALES_TABLE).catch(
+          // dedup_key: makePersonResolver 가 "동명이인 + 연락처 빈 행"을 행 단위로 구분하는 기준.
+          fetchAllRows(
+            'dedup_key,이름,연락처,성별,수강권명,수강권종류,등록일,수강권시작일,전체횟수,잔여횟수',
+          ),
+          fetchAllRows('dedup_key,이름,연락처,수강권명,결제금액,결제일시', 50000, SALES_TABLE).catch(
             () => [] as MemberRecord[],
           ),
           (async () => {
@@ -122,12 +125,16 @@ export default function Dashboard() {
     return Array.from(set).sort((a, b) => b - a);
   }, [members, sales, costs]);
 
+  /* 동일인 판정기 — members+sales 전 행을 훑어 이름별 연락처 목록을 만드는 O(n) 작업이라
+     기간(period)이 바뀔 때마다 다시 만들면 안 된다(기간 피커 드래그마다 3만 행 재스캔). */
+  const personKeyOf = useMemo(() => makePersonResolver(members ?? [], sales), [members, sales]);
+
   // 지점별 지표
   const branchStats = useMemo<BranchStat[] | null>(() => {
     if (!members) return null;
     // 지점이 달라도 이름+연락처가 같으면 한 사람 — 지점별 "총회원"은 그 지점에 등록건이
     // 있는 사람 수를 센다(전 지점 공통 기준으로 묶은 뒤 세므로 사람 단위가 일관된다).
-    const keyOf = makePersonResolver(members, sales);
+    const keyOf = personKeyOf;
     return BRANCHES.map((b) => {
       const inBranch = members.filter((r) => matchesBranch(r, b));
       const periodRegs = inBranch.filter((r) => inPeriod(ymKey(regDate(r)), period));
@@ -156,23 +163,28 @@ export default function Dashboard() {
         기타비용: c.기타비용,
       };
     });
-  }, [members, sales, costs, period]);
+  }, [members, sales, costs, period, personKeyOf]);
 
   const totalRow = useMemo(() => {
-    if (!branchStats) return null;
-    return branchStats.reduce(
+    if (!branchStats || !members) return null;
+    const sum = branchStats.reduce(
       (a, s) => ({
         체험: a.체험 + s.체험,
         신규: a.신규 + s.신규,
-        총회원: a.총회원 + s.총회원,
         매출: a.매출 + s.매출,
         인건비: a.인건비 + s.인건비,
         임대료: a.임대료 + s.임대료,
         기타비용: a.기타비용 + s.기타비용,
       }),
-      { 체험: 0, 신규: 0, 총회원: 0, 매출: 0, 인건비: 0, 임대료: 0, 기타비용: 0 },
+      { 체험: 0, 신규: 0, 매출: 0, 인건비: 0, 임대료: 0, 기타비용: 0 },
     );
-  }, [branchStats]);
+    /* 총회원만은 지점별 값을 더하면 안 된다 — 판교·반포·옥수에 등록건이 있는 이가원이
+       세 지점 Set 에 각각 들어가 3명으로 세어진다. "지점이 사람을 나누지 않는다"는
+       이 앱의 기본 규칙과 어긋나고, 회원 관리 화면의 "총 회원" 칩과도 숫자가 달라진다.
+       그래서 전 회원을 한 번에 중복 제거해서 센다. */
+    const 총회원 = new Set(members.map((r) => personKeyOf(r))).size;
+    return { ...sum, 총회원 };
+  }, [branchStats, members, personKeyOf]);
 
   // 분포 차트(전체 로스터, 지점 필터 적용) — 수강권 종류는 수강권명 기준(ticketType)
   const dist = useMemo(() => {

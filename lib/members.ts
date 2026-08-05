@@ -142,9 +142,17 @@ export function personKey(rec: Record<string, unknown>): string {
    그래서 전체 행을 한 번 훑어 이름별 연락처 목록을 만들고:
      · 연락처가 있으면      → 이름+연락처 (기존과 동일)
      · 연락처가 비어 있고, 그 이름의 연락처가 **딱 하나뿐**이면 → 그 사람으로 붙인다
-     · 그 이름에 연락처가 여럿이면(동명이인) → 판정 불가라 붙이지 않고 따로 둔다
+     · 그 이름에 연락처가 **하나도 없으면** → 이름으로 묶는다(다른 사람이라는 근거가 없다)
+     · 그 이름에 연락처가 **여럿이면(동명이인)** → 누구인지 판정 불가 → 행마다 따로 센다
    동명이인을 잘못 합치지 않기 위한 보수적 규칙이다. 실측상 '김민정'처럼 서로 다른
    연락처가 24개인 이름도 있어서, 이름만으로 합치는 것은 절대 안 된다.
+
+   ⚠️ 마지막 규칙이 중요하다. 판정 불가 행을 전부 `이름+''` 하나로 보내면(예전 동작)
+      **서로 다른 사람이 한 명으로 뭉친다** — 연락처 없는 '김민정' 5행이 각 30회면
+      가짜 1명이 150회가 되어 "100회 이상" 필터에 걸리고, 총회원은 5명이 1명이 된다.
+      그래서 행 단위로 쪼갠다. 쪼개는 기준은 dedup_key(같은 행이면 어느 조회에서 왔든
+      같은 키) → 없으면 행 객체별 일련번호(같은 조회 안에서만 유효).
+      집계용 조회에는 되도록 dedup_key 를 select 에 포함시킬 것.
 
    사용법:
      const keyOf = makePersonResolver(memberRows, salesRows);
@@ -166,13 +174,23 @@ export function makePersonResolver(
       set.add(ph);
     }
   }
+  // 판정 불가 행에 줄 일련번호(dedup_key 가 없을 때만). 행 객체 기준이라 같은 행을
+  // 여러 번 물어봐도 같은 키가 나온다.
+  const fallbackIds = new WeakMap<object, string>();
+  let fallbackSeq = 0;
   return (rec) => {
     const name = String(rec['이름'] ?? '').trim();
     const ph = phoneDigits(rec['연락처']);
     if (ph) return name + KEY_SEP + ph;
     const set = phonesByName.get(name);
     if (set && set.size === 1) return name + KEY_SEP + [...set][0]; // 유일하니 그 사람으로
-    return name + KEY_SEP + ''; // 판정 불가 — 따로 둔다
+    if (!set) return name + KEY_SEP + ''; // 이 이름엔 연락처가 아예 없다 → 이름으로 묶는다
+    // 동명이인 + 연락처 빈 행 — 누구인지 알 수 없으므로 다른 사람과 절대 합치지 않는다.
+    const dk = String(rec['dedup_key'] ?? '');
+    if (dk) return name + KEY_SEP + '?' + KEY_SEP + dk;
+    let id = fallbackIds.get(rec);
+    if (!id) fallbackIds.set(rec, (id = '#' + ++fallbackSeq));
+    return name + KEY_SEP + '?' + KEY_SEP + id;
   };
 }
 
@@ -279,7 +297,16 @@ export function sanitizeSearchTerm(q: string): string {
 
 /* ======================================================================
    여러 컬럼만 골라 전체 행을 페이지 단위로 가져오기 (통계용)
+   ---------------------------------------------------------------------
+   ⚠️ 반드시 정렬을 걸고 페이징한다. Postgres 는 ORDER BY 없는 LIMIT/OFFSET 의
+   행 순서를 보장하지 않아서, 페이지 사이에 같은 행이 두 번 나오거나 어떤 행이
+   아예 빠질 수 있다(플랜이 바뀌거나 다른 탭에서 업로드가 도는 중에 실제로 발생).
+   이 결과는 1인 합산 사용횟수의 "정확한 합계"로 쓰이므로, 한 행이 두 번 잡히면
+   그 사람 총 사용횟수가 부풀고 "N회 이상" 필터의 포함/제외가 뒤집힌다.
+   id 는 members·sales 둘 다 identity PK 라 안정적인 정렬 기준이다.
    ====================================================================== */
+export const SCAN_ORDER_COL = 'id';
+
 export async function fetchAllRows(
   select: string,
   cap = 50000,
@@ -289,7 +316,11 @@ export async function fetchAllRows(
   let from = 0;
   let out: MemberRecord[] = [];
   while (from < cap) {
-    const { data, error } = await sb.from(table).select(select).range(from, from + PAGE - 1);
+    const { data, error } = await sb
+      .from(table)
+      .select(select)
+      .order(SCAN_ORDER_COL, { ascending: true })
+      .range(from, from + PAGE - 1);
     if (error) throw error;
     if (!data || !data.length) break;
     out = out.concat(data as unknown as MemberRecord[]);

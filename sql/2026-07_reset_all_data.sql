@@ -20,7 +20,13 @@ select 'sales', count(*) from public.sales;
 
 -- 2. 전체 삭제 (위 건수를 확인한 뒤에 실행)
 --    identity/serial 컬럼이 있으면 번호도 1부터 다시 시작한다.
-truncate table public.members, public.sales restart identity;
+--
+--    🔒 안전장치: 아래 truncate 는 기본으로 주석 처리해 둔다.
+--    이 파일을 통째로 붙여넣고 Run 하면 "1. 건수 확인"과 삭제가 한 번에 실행되어
+--    되돌릴 수 없기 때문이다(무료 플랜에는 자동 백업이 없다).
+--    지울 의도가 확실할 때만 앞의 `-- ` 를 직접 지우고 그 줄만 선택해서 실행할 것.
+--
+-- truncate table public.members, public.sales restart identity;
 
 
 -- 3. 결과 확인 — 둘 다 0 이어야 한다

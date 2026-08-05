@@ -160,12 +160,27 @@ export default function Upload() {
       // (실제로 `등록일` 컬럼이 빠진 파일 때문에 사용횟수가 48% 누락된 적이 있다.)
       if (toMembers) {
         const emptyKeyCols = KEY_COLS.filter((c) => !hasAnyValue(crows, c));
-        if (emptyKeyCols.length) {
+        /* 등급을 나눈다 — 아래 컬럼이 비면 서로 다른 등록건이 실제로 뭉개진다.
+           나머지 결제 컬럼(할부개월수·결제방법·결제구분 등)은 일시불만 있는 지점/기간처럼
+           **정상적으로 전 행이 빌 수 있어서**, 전부 빨간 오류로 띄우면 오탐이 상시화되고
+           정작 중요한 경고(등록일·연락처 누락)까지 같이 무시된다. */
+        const CRITICAL = new Set(['이름', '연락처', '수강권명', '수강권시작일', '결제일시']);
+        const critical = emptyKeyCols.filter((c) => CRITICAL.has(c));
+        const minor = emptyKeyCols.filter((c) => !CRITICAL.has(c));
+        if (critical.length) {
           addLog({
             msg:
-              `⚠️ ${f.name} — 중복 판정 키 컬럼(${emptyKeyCols.join(', ')})이 전부 비어 있습니다. ` +
+              `⚠️ ${f.name} — 중복 판정 키 컬럼(${critical.join(', ')})이 전부 비어 있습니다. ` +
               `서로 다른 등록건이 하나로 합쳐져 사용횟수가 적게 집계될 수 있습니다. 내보내기 항목을 확인하세요.`,
             kind: 'err',
+          });
+        }
+        if (minor.length) {
+          addLog({
+            msg:
+              `ℹ️ ${f.name} — 키 컬럼 ${minor.join(', ')}이(가) 전부 비어 있습니다. ` +
+              `해당 결제 유형이 없으면 정상이지만, 이전 파일과 헤더가 같은지 한 번 확인하세요.`,
+            kind: 'info',
           });
         }
       }

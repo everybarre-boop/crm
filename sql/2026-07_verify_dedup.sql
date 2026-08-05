@@ -44,4 +44,5 @@ where m.dedup_key is distinct from (
     || coalesce(m."할부개월수",   '')
 );
 -- → 이 값이 0 이 아니면, apply_attendance 반영 전에 dedup_key 를 재백필해야 한다.
---   (재백필 공식은 sql/2026-07_dedup_members.sql 참고.)
+--   재백필은 sql/2026-08_rekey_dedup_keys.sql 로 한다(members·sales 양쪽 + 중복 정리 + 안전 가드).
+--   ⛔️ sql/2026-07_dedup_members.sql 은 **옛 공식**이라 폐기됐다 — 실행하면 재등록 행이 삭제된다.

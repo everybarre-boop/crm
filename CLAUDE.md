@@ -78,17 +78,27 @@ DB 스키마·마이그레이션은 Drizzle(drizzle-kit)로 관리한다. **런�
   두고(`.gitignore`로 차단됨) **절대 커밋·클라이언트 사용 금지.** `service_role` 키와
   같은 급의 비밀로 취급할 것. **주의: 이 작업 폴더는 OneDrive 로 동기화되므로**,
   `.env.local`을 여기 두면 DB 전권 비밀번호가 클라우드로 동기화된다(RLS 우회 자격증명 유출).
-  가능하면 `.env.local`을 동기화 밖 경로에 두고 [drizzle.config.ts](drizzle.config.ts)의
-  `config({ path })`를 그 경로로 가리키게 할 것. (`.gitignore`는 커밋만 막지 동기화는 못 막는다.)
+  가능하면 `.env.local`을 동기화 밖 경로에 두고 **`DOTENV_PATH` 환경변수**로 그 경로를
+  가리킬 것 — [drizzle.config.ts](drizzle.config.ts)와
+  [scripts/backup-table.mjs](scripts/backup-table.mjs) 둘 다 `DOTENV_PATH`를 먼저 보고,
+  없을 때만 `.env.local`로 폴백한다(코드 수정 불필요).
+  (`.gitignore`는 커밋만 막지 동기화는 못 막는다.)
 - 접속 문자열은 Supabase → Connect → **Session pooler**(`aws-*.pooler.supabase.com`)를 쓴다.
   직접 연결(`db.<ref>.supabase.co`)은 IPv6 전용이라 대부분의 IPv4 환경에서 DNS 가 안 잡힌다.
 - 스키마 정의: [lib/db/schema.ts](lib/db/schema.ts). 설정: [drizzle.config.ts](drizzle.config.ts)
   (관리 대상은 `public.members`로 한정). 생성 마이그레이션은 `drizzle/`에 커밋한다.
-- **`dedup_key` 현황(해소됨):** 과거 `members`에는 실제 `dedup_key` 컬럼/유니크 인덱스가
-  없어 코드/문서와 어긋났었다. [sql/2026-07_dedup_members.sql](sql/2026-07_dedup_members.sql)로
-  **컬럼 백필 + 기존 중복 정리 + `dedup_key text unique` 인덱스**를 반영해 이 불일치를 해소했다.
-  이제 `members`·`sales` 둘 다 `dedup_key text unique`가 실재하며 upsert 덮어쓰기가 정상 동작한다.
-  `schema.ts`의 `dedupKey` 정의(양 테이블)는 이 실제 DB 상태와 일치한다.
+- **`dedup_key` 현황:** `members`·`sales` 둘 다 `dedup_key` + 유니크 제약이 실재하며 upsert
+  덮어쓰기가 정상 동작한다. `schema.ts`의 `dedupKey` 정의(양 테이블)는 실제 DB 상태와 일치한다.
+  - ✅ **2026-08 KEY_COLS 개정분은 DB 에 이미 반영돼 있다.** 2026-08-05 실측으로
+    `members` 17,617행 · `sales` 17,602행 **전부 새 공식과 일치**(어긋난 행 0, 새 키 충돌 0).
+    2026-08-04 초기화 + 전 지점 재업로드가 새 키로 들어갔기 때문이다.
+  - 키를 **또** 바꾸거나, 옛 키가 섞인 백업을 복원했거나, verify 결과가 0이 아닐 때는
+    [sql/2026-08_rekey_dedup_keys.sql](sql/2026-08_rekey_dedup_keys.sql)로 맞춘다
+    (점검 → 어긋난 행만 재키잉 → 중복 정리 → 유니크 인덱스 복구. 한 트랜잭션이고,
+    정리 대상이 5%를 넘으면 공식이 틀린 것으로 보고 스스로 중단한다).
+    단, 재키잉은 **옛 키가 이미 합쳐 버린 행을 되살리지 못한다** — 그건 원본 엑셀 재업로드뿐이다.
+  - ⛔️ [sql/2026-07_dedup_members.sql](sql/2026-07_dedup_members.sql)은 **폐기**됐다(옛 공식).
+    실행하면 같은 사람의 재등록 행을 전부 삭제한다. 본문은 주석 처리해 뒀다.
 - **새 스키마/컬럼은 [sql/](sql/) 의 손수 작성 SQL로 반영한다.** 서버 없는 정적 앱이라
   Supabase SQL Editor 직접 실행이 가장 단순하다. `schema.ts`는 짝을 맞춰 갱신해 두되(향후
   `db:pull` 대조 기준), 운영 반영은 그 SQL을 쓴다. `members.used_count`(생성 컬럼)와 `sales`가
@@ -113,7 +123,13 @@ npm run db:backup members    # 다른 테이블 (여러 개 나열 가능)
 `DATABASE_URL` 로 직접 붙어 CSV 를 뜬다(Drizzle 과 같은 "개발 도구 전용" 경로 — 클라이언트
 번들과 무관). 결과 CSV 는 회원 PII 이므로 기본 저장 위치를 **OneDrive 동기화 밖**
 (`%LOCALAPPDATA%\evble-backup`)으로 뒀다. `BACKUP_DIR` 로 바꿀 수 있지만 프로젝트 폴더에는
-두지 말 것 — `.gitignore` 는 커밋만 막지 동기화는 못 막는다.
+두지 말 것 — `.gitignore` 는 커밋만 막지 동기화는 못 막는다. **이건 이제 스크립트가 직접
+막는다**: 저장 경로가 프로젝트 폴더 안이거나 경로에 `OneDrive` 가 들어가면 DB 에 붙기 전에
+중단한다(`BACKUP_DIR=public` 으로 `out/` 에 실려 공개 배포되는 사고도 같이 막힌다).
+CSV 는 Excel 열람을 전제하므로 `=` `+` `-` `@` 로 시작하는 셀 값 앞에 `'` 를 붙여
+**수식 실행(CSV 인젝션)을 차단**한다 — 회원이 이름·메모란에 넣은 `=HYPERLINK(...)` 가
+관리자 Excel 에서 실행되면 옆 셀의 실명·연락처가 외부로 나간다. 순수 숫자(음수 포함)는
+그대로 둬서 값이 변형되지 않는다.
 
 ## 구조
 
@@ -170,16 +186,27 @@ npm run db:backup members    # 다른 테이블 (여러 개 나열 가능)
       되돌리기 어려운 작업 전에는 `npm run db:backup` 으로 먼저 덤프를 뜬다.
   - `KEY_COLS`/`SALES_KEY_COLS`를 바꾸면 **DB의 unique 인덱스 기준과 백필 SQL 공식도 함께**
     바꿔야 한다(코드↔DB 공식 불일치 시 중복이 다시 생긴다).
-  - 잔여/예약가능/취소가능 횟수, 결제금액 등 "변하는 값"은 members 키에 넣지 말 것.
-  - ✅ **`members`·`sales` 모두 실제 `dedup_key text unique` 제약이 있다.**
-    (members 는 [sql/2026-07_dedup_members.sql](sql/2026-07_dedup_members.sql)로 컬럼 백필 +
-    기존 중복 정리 + 유니크 인덱스를 반영해 과거 불일치를 해소함.)
+  - **"변하는 값"의 기준은 "재업로드 때 값이 달라지는가"다.** 잔여/예약가능/취소가능 횟수,
+    `전체횟수`, `수강권종료일`은 매 내보내기마다 달라지므로 키에 넣으면 안 된다.
+    반대로 `결제금액`·`결제일시`·`결제방법`·`할부개월수`는 **결제 시점에 확정되고 이후 안 변하므로
+    키에 들어간다**(2026-08 개정). 이 둘을 헷갈리지 말 것 — 결제 컬럼이 키에 있어야
+    "같은 수강권 재등록"이 별개 행으로 남는다.
+  - ✅ **`members`·`sales` 모두 실제 `dedup_key` 유니크 제약이 있다.**
+    현재 공식 확인은 [sql/2026-07_verify_dedup.sql](sql/2026-07_verify_dedup.sql),
+    재백필은 [sql/2026-08_rekey_dedup_keys.sql](sql/2026-08_rekey_dedup_keys.sql).
 - **동일인 판정 = 이름 + 연락처(숫자만).** 지점은 수강권명 안에 있을 뿐 사람을 나누지
   않는다 — **판교 이가원 · 반포 이가원은 한 사람이고, 사용횟수는 전 지점 합산이다.**
   [lib/members.ts](lib/members.ts)의 `makePersonResolver(...rowSets)`를 쓸 것(`personKey`는
   행 하나짜리 저수준 함수). resolver 는 전체 행을 먼저 훑어 **연락처가 빈 행**(실측 385행)을
   그 이름의 연락처가 **유일할 때만** 붙인다. 이름만으로 합치면 안 된다 — '김민정'처럼 서로
   다른 연락처가 24개인 동명이인이 실재한다.
+  - **연락처가 비었고 그 이름에 연락처가 여럿이면(동명이인) 행마다 따로 센다.** 예전엔 이런
+    행을 전부 `이름+''` 하나로 보내서 **서로 다른 사람이 한 명으로 뭉쳤다**(연락처 없는
+    '김민정' 5행 × 30회 = 가짜 1명 150회 → "100회 이상" 필터에 오검출, 총회원은 5명이 1명).
+    구분 기준은 `dedup_key`라, **집계용 select 에는 `dedup_key`를 포함시킬 것**
+    (없으면 조회 안에서만 유효한 일련번호로 대체된다).
+  - 지점별 인원을 더해서 전체 인원을 내지 말 것 — 다지점 회원이 중복 계수된다.
+    합계는 전 행을 한 번에 `new Set(rows.map(keyOf)).size` 로 센다(대시보드 합계 행 참고).
 - **`등록일`은 전 행이 비어 있다**(내보내기에 컬럼이 없음). 기간 집계는 `regDate(rec)`
   (`등록일` 없으면 `수강권시작일`)를 쓸 것. 대시보드 신규/체험 집계가 이것 때문에 0이었다.
 - **`used_count`(사용횟수) 컬럼:** `members.used_count` = `전체횟수 − 잔여횟수`인 STORED
@@ -190,6 +217,14 @@ npm run db:backup members    # 다른 테이블 (여러 개 나열 가능)
     "100회 이상"이 **한 수강권에서만 100회 넘게 쓴 행**을 찾았다(실측 1명). 지금은 전체
     members 를 한 번 읽어 **사람별 합계**로 거른다(같은 조건 282명). 합계 기준은 전 지점
     합산이라 지점 필터와 무관하다. 사람 단위 필터가 켜지면 화면에서 페이징한다.
+  - ⚠️ **전체를 훑는 페이징에는 반드시 `.order()` 를 건다.** Postgres 는 ORDER BY 없는
+    LIMIT/OFFSET 의 행 순서를 보장하지 않아, 페이지 사이에 같은 행이 두 번 나오거나 빠진다.
+    합계가 조용히 부풀어 필터 결과가 뒤집힌다. `fetchAllRows` 는 `SCAN_ORDER_COL`(=`id`)로
+    정렬하며, 직접 짜는 스캔 루프도 똑같이 할 것.
+  - **숫자 컬럼 정렬은 서버(`.order()`)에 맡기면 안 된다.** DB 컬럼이 전부 `text` 라
+    사전순(전체횟수 300 < 9)이 된다. 회원 관리는 `NUM_COLS` 정렬이면 전체를 받아 화면에서
+    숫자로 정렬한다(그래야 사용횟수 필터를 켜고 끌 때 순서가 안 바뀐다). 스캔 결과는
+    조건별로 캐시하므로 페이지 이동만으로는 다시 긁지 않는다.
 - **DB 마이그레이션(1회):** 위 `sales` 테이블 + RLS + `members.used_count`는
   [sql/2026-07_sales_and_used_count.sql](sql/2026-07_sales_and_used_count.sql)을
   Supabase SQL Editor에서 실행해 반영한다(idempotent). 이 SQL을 돌리기 전에는

@@ -62,10 +62,15 @@ export default function MemberSummary() {
     (async () => {
       try {
         const [m, s] = await Promise.all([
-          fetchAllRows('이름,연락처,성별,수강권명,수강권종류,전체횟수,잔여횟수,등록일,수강권종료일'),
-          fetchAllRows('이름,연락처,수강권명,수강권종류,결제구분,결제금액,결제일시', 50000, SALES_TABLE).catch(
-            () => [] as MemberRecord[],
+          // dedup_key: makePersonResolver 가 "동명이인 + 연락처 빈 행"을 행 단위로 구분하는 기준.
+          fetchAllRows(
+            'dedup_key,이름,연락처,성별,수강권명,수강권종류,전체횟수,잔여횟수,등록일,수강권종료일',
           ),
+          fetchAllRows(
+            'dedup_key,이름,연락처,수강권명,수강권종류,결제구분,결제금액,결제일시',
+            50000,
+            SALES_TABLE,
+          ).catch(() => [] as MemberRecord[]),
         ]);
         if (!alive) return;
         setMemberRows(m);

@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { sb } from '@/lib/supabase';
@@ -18,6 +18,7 @@ import {
   fetchAllRows,
   makePersonResolver,
   isUsableTicket,
+  SCAN_ORDER_COL,
   type MemberRecord,
 } from '@/lib/members';
 import { useToast } from '@/components/ui/Toast';
@@ -69,7 +70,9 @@ export default function Members() {
     let alive = true;
     (async () => {
       try {
-        const all = await fetchAllRows('이름,연락처,전체횟수,잔여횟수');
+        // dedup_key 도 받는다 — makePersonResolver 가 "동명이인 + 연락처 빈 행"을
+        // 행 단위로 구분하는 기준이고, 표/요약과 같은 키를 얻으려면 양쪽에 있어야 한다.
+        const all = await fetchAllRows('dedup_key,이름,연락처,전체횟수,잔여횟수');
         if (!alive) return;
         const keyOf = makePersonResolver(all);
         const totals = new Map<string, number>();
@@ -99,10 +102,23 @@ export default function Members() {
   const maxN = usedMax !== '' && !isNaN(Number(usedMax)) ? Number(usedMax) : null;
   const usedFilterOn = minN !== null || maxN !== null;
 
+  /* 클라이언트에서 걸러야 하는 두 경우 — 이때만 전체를 받아 화면에서 페이징한다.
+     ① 사용횟수 필터: 사람 단위 합계라 서버가 못 건다.
+     ② 숫자 컬럼 정렬: DB 컬럼이 전부 text 라 서버 정렬은 **사전순**이 된다
+        (전체횟수 300 < 9). 예전에는 ①이 켜질 때만 숫자 정렬을 해서, 같은 화면이
+        사용횟수 필터를 넣고 빼는 것만으로 정렬 순서가 뒤바뀌었다. 숫자 컬럼은
+        항상 이쪽 경로로 보내 두 경우의 순서를 일치시킨다. */
+  const clientSide = usedFilterOn || NUM_COLS.has(sort);
+
+  /* 전체 스캔 결과 캐시 — page/size 만 바뀔 때 17,000행을 다시 긁지 않는다.
+     (예전엔 "다음" 클릭 한 번마다 select('*') 왕복 ~18회가 다시 돌았다) */
+  const scanCache = useRef<{ sig: string; hit: MemberRecord[] } | null>(null);
+
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
     setLoading(true);
     setLoadError(null);
+    let keepLoading = false; // 인덱스 대기 중이면 스피너를 유지한다(아래 finally)
     try {
       // 검색·드롭다운·지점은 서버에서 거른다(사용횟수 제외 — 그건 사람 단위라 아래에서).
       /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -118,8 +134,8 @@ export default function Members() {
       };
       /* eslint-enable @typescript-eslint/no-explicit-any */
 
-      if (!usedFilterOn) {
-        // ── 빠른 길: 사용횟수 필터가 없으면 서버 페이징 그대로 ──
+      if (!clientSide) {
+        // ── 빠른 길: 서버 페이징 그대로 ──
         const query = applyServerFilters(sb.from(TABLE).select('*', { count: 'exact' }))
           .order(sort, { ascending: dir, nullsFirst: false })
           .range(page * size, page * size + size - 1);
@@ -131,57 +147,73 @@ export default function Members() {
         return;
       }
 
-      // ── 사람 단위 사용횟수 필터: 전체를 받아 사람별 합계로 거른 뒤 화면에서 페이징 ──
-      if (!personTotals || !personKeyOf) {
+      // ── 전체를 받아 (사람별 합계로 거르고) 정렬한 뒤 화면에서 페이징 ──
+      if (usedFilterOn && (!personTotals || !personKeyOf)) {
         if (indexError) throw new Error('1인 합산 사용횟수를 계산하지 못했습니다.');
-        return; // 인덱스 준비 중 — 준비되면 이 effect 가 다시 돈다
+        // 인덱스 준비 중 — 준비되면 이 effect 가 다시 돈다. 이전(필터 없던) 결과를
+        // 그대로 두고 스피너만 끄면 "100회 이상 = 17,617명" 처럼 읽히므로 로딩을 유지한다.
+        keepLoading = true;
+        return;
       }
-      const PAGE = 1000;
-      const collected: MemberRecord[] = [];
-      for (let from = 0; ; from += PAGE) {
-        const { data, error } = await applyServerFilters(sb.from(TABLE).select('*')).range(
-          from,
-          from + PAGE - 1,
-        );
+
+      // 같은 조건이면 이미 받아 둔 결과를 재사용한다(page/size 는 signature 에 없다).
+      const sig = JSON.stringify([q, filters, branch, minN, maxN, sort, dir, refreshKey]);
+      let hit = scanCache.current?.sig === sig ? scanCache.current.hit : null;
+
+      if (!hit) {
+        const PAGE = 1000;
+        const collected: MemberRecord[] = [];
+        for (let from = 0; ; from += PAGE) {
+          // ⚠️ .order() 필수 — ORDER BY 없는 OFFSET 페이징은 행 중복/누락을 낸다.
+          const { data, error } = await applyServerFilters(sb.from(TABLE).select('*'))
+            .order(SCAN_ORDER_COL, { ascending: true })
+            .range(from, from + PAGE - 1);
+          if (seq !== loadSeq.current) return;
+          if (error) throw error;
+          const chunk = (data as unknown as MemberRecord[]) || [];
+          collected.push(...chunk);
+          if (chunk.length < PAGE || collected.length >= 50000) break;
+        }
+        hit =
+          usedFilterOn && personTotals && personKeyOf
+            ? collected.filter((r) => {
+                const t = personTotals.get(personKeyOf(r)) ?? 0;
+                if (minN !== null && t < minN) return false;
+                if (maxN !== null && t > maxN) return false;
+                return true;
+              })
+            : collected;
+        // 서버 정렬을 못 쓰므로 화면에서 정렬한다(숫자 컬럼은 숫자로, 빈 값은 항상 뒤).
+        const num = NUM_COLS.has(sort);
+        hit.sort((a, b) => {
+          const av = a[sort] ?? '';
+          const bv = b[sort] ?? '';
+          if (av === '' && bv === '') return 0;
+          if (av === '') return 1;
+          if (bv === '') return -1;
+          const c = num
+            ? Number(String(av).replace(/[^0-9.-]/g, '')) - Number(String(bv).replace(/[^0-9.-]/g, ''))
+            : String(av).localeCompare(String(bv), 'ko');
+          return dir ? c : -c;
+        });
         if (seq !== loadSeq.current) return;
-        if (error) throw error;
-        const chunk = (data as unknown as MemberRecord[]) || [];
-        collected.push(...chunk);
-        if (chunk.length < PAGE || collected.length >= 50000) break;
+        scanCache.current = { sig, hit };
       }
-      const hit = collected.filter((r) => {
-        const t = personTotals.get(personKeyOf(r)) ?? 0;
-        if (minN !== null && t < minN) return false;
-        if (maxN !== null && t > maxN) return false;
-        return true;
-      });
-      // 서버 정렬을 못 쓰므로 같은 규칙으로 화면에서 정렬한다(빈 값은 항상 뒤).
-      const num = NUM_COLS.has(sort);
-      hit.sort((a, b) => {
-        const av = a[sort] ?? '';
-        const bv = b[sort] ?? '';
-        if (av === '' && bv === '') return 0;
-        if (av === '') return 1;
-        if (bv === '') return -1;
-        const c = num
-          ? Number(String(av).replace(/[^0-9.-]/g, '')) - Number(String(bv).replace(/[^0-9.-]/g, ''))
-          : String(av).localeCompare(String(bv), 'ko');
-        return dir ? c : -c;
-      });
-      if (seq !== loadSeq.current) return;
       setRows(hit.slice(page * size, page * size + size));
       setTotal(hit.length);
     } catch (err) {
       if (seq !== loadSeq.current) return;
       setLoadError((err as Error).message || String(err));
       setRows([]);
+      setTotal(0); // 이걸 안 지우면 "총 17,617건 · 다음" 페이저가 살아 있어 계속 실패만 반복한다
     } finally {
-      if (seq === loadSeq.current) setLoading(false);
+      if (seq === loadSeq.current && !keepLoading) setLoading(false);
     }
   }, [
     q,
     filters,
     branch,
+    clientSide,
     usedFilterOn,
     minN,
     maxN,
@@ -192,6 +224,7 @@ export default function Members() {
     personTotals,
     personKeyOf,
     indexError,
+    refreshKey,
   ]);
 
   useEffect(() => {
@@ -202,6 +235,13 @@ export default function Members() {
   // 이름+연락처로 1인 단위로 묶는다. (페이지네이션과 무관하게 전체를 집계) 필터를 빠르게
   // 바꿔도 매번 전체를 긁지 않도록 350ms 디바운스한다.
   useEffect(() => {
+    /* 전역 resolver 가 준비되기 전에는 계산하지 않는다.
+       예전엔 personKeyOf 가 없으면 `makePersonResolver(all)` 로 대체했는데, 그 `all` 은
+       검색·지점 필터가 이미 적용된 **부분집합**이라 "이 이름의 연락처가 유일한가" 판정이
+       전역이 아니라 필터 범위 안에서 이뤄졌다 — 같은 사람인데 화면마다 회원 수가 달라진다. */
+    if (!personKeyOf) return;
+    if (usedFilterOn && !personTotals) return; // 인덱스 준비되면 deps 변경으로 다시 돈다
+    const keyOf = personKeyOf;
     let alive = true;
     const t = setTimeout(async () => {
       try {
@@ -209,22 +249,23 @@ export default function Members() {
         const all: MemberRecord[] = [];
         for (let from = 0; ; from += PAGE) {
           // 사용횟수는 여기서 거르지 않는다 — 사람 단위 합계라 아래에서 personTotals 로 건다.
-          let query = sb.from(TABLE).select('이름,연락처,잔여횟수,수강권종료일');
+          // dedup_key: 동명이인 + 연락처 빈 행을 표·인덱스와 같은 기준으로 구분하기 위함.
+          let query = sb.from(TABLE).select('dedup_key,이름,연락처,잔여횟수,수강권종료일');
           const term = sanitizeSearchTerm(q);
           if (term) query = query.or(SEARCH_COLS.map((c) => `${c}.ilike.%${term}%`).join(','));
           for (const c of FILTER_COLS) if (filters[c]) query = query.eq(c, filters[c]);
           if (branch) query = query.ilike(BRANCH_SRC_COL, `%${branch}%`);
-          const { data, error } = await query.range(from, from + PAGE - 1);
+          // ⚠️ .order() 필수 — ORDER BY 없는 OFFSET 페이징은 행 중복/누락을 낸다.
+          const { data, error } = await query
+            .order(SCAN_ORDER_COL, { ascending: true })
+            .range(from, from + PAGE - 1);
+          if (!alive) return; // 필터가 바뀌었다 — 남은 페이지를 더 긁지 않는다
           if (error) throw error;
           const chunk = (data as unknown as MemberRecord[]) || [];
           all.push(...chunk);
           if (chunk.length < PAGE || from + PAGE >= 50000) break;
         }
-        if (!alive) return;
-        if (usedFilterOn && (!personTotals || !personKeyOf)) return; // 인덱스 준비되면 다시 계산
         // 전 행을 다 모은 뒤에 1인 단위로 묶는다 — 지점이 달라도 이름+연락처가 같으면 한 사람.
-        // (연락처 빈 행을 붙이려면 이름별 연락처 목록이 필요해서 청크 단위로는 못 한다)
-        const keyOf = personKeyOf ?? makePersonResolver(all);
         const activeByPerson = new Map<string, boolean>(); // 사람 → 사용 가능 수강권 보유 여부
         for (const r of all) {
           const k = keyOf(r);
@@ -412,6 +453,11 @@ export default function Members() {
 
         {/* 요약 통계 — 현재 필터(지점 등) 기준 1인 단위 집계. 지점 미선택 시 전체 대상. */}
         <div className="ml-auto flex flex-wrap items-center gap-2 self-center">
+          {indexError && (
+            <span className="text-[12px] text-danger">
+              1인 합산 사용횟수를 불러오지 못했습니다 — 사용횟수 필터·합계 열을 쓸 수 없습니다.
+            </span>
+          )}
           <StatChip label="총 회원" value={stats?.total} loading={stats === null} />
           <StatChip label="현재 사용" value={stats?.active} tone="green" loading={stats === null} />
           <StatChip label="만료" value={stats?.expired} tone="muted" loading={stats === null} />
@@ -471,9 +517,13 @@ export default function Members() {
                       {NUM_COLS.has(c) ? fmtNum(r[c]) : (r[c] ?? '')}
                     </td>
                   ))}
-                  {/* 이 행이 아니라 "이 사람"의 전 지점 합계 */}
+                  {/* 이 행이 아니라 "이 사람"의 전 지점 합계. 실패 시 '—'(로딩 '…' 과 구분) */}
                   <td className="border-b border-[#eef0f4] px-3 py-[10px] font-semibold">
-                    {personTotals && personKeyOf ? fmtNum(personTotals.get(personKeyOf(r)) ?? 0) : '…'}
+                    {personTotals && personKeyOf
+                      ? fmtNum(personTotals.get(personKeyOf(r)) ?? 0)
+                      : indexError
+                        ? '—'
+                        : '…'}
                   </td>
                   <td className="border-b border-[#eef0f4] px-3 py-[10px]">
                     <div className="flex gap-[6px]">
@@ -513,8 +563,9 @@ export default function Members() {
           onSaved={() => {
             setEditRow(null);
             toast('수정되었습니다.');
-            load();
-            setRefreshKey((k) => k + 1); // 횟수가 바뀌었을 수 있으니 1인 합산도 다시 계산
+            // refreshKey 만 올린다 — 인덱스 재계산 + load() 재실행이 여기에 딸려 온다.
+            // (load() 를 같이 부르면 전체 스캔이 두 번 돈다)
+            setRefreshKey((k) => k + 1);
           }}
           onError={(m) => toast('수정 실패: ' + m, 'err')}
         />
@@ -526,8 +577,7 @@ export default function Members() {
           onDeleted={() => {
             setDelRow(null);
             toast('삭제되었습니다.');
-            load();
-            setRefreshKey((k) => k + 1); // 등록건이 사라졌으니 1인 합산도 다시 계산
+            setRefreshKey((k) => k + 1); // 등록건이 사라졌으니 1인 합산 인덱스 → load() 순으로 갱신
           }}
           onError={(m) => toast('삭제 실패: ' + m, 'err')}
         />
