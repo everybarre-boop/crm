@@ -173,7 +173,8 @@ as $$
 declare
   caller  text    := auth.jwt() ->> 'email';
   req     integer := coalesce(jsonb_array_length(records), 0);
-  usable  integer := 0;
+  parsed  integer := 0;   -- 날짜를 읽어낸 건수
+  usable  integer := 0;   -- 그 중 res_key 중복을 접고 남은 건수
   saved   integer := 0;
   skipped jsonb   := '[]'::jsonb;
 begin
@@ -181,10 +182,16 @@ begin
     raise exception 'save_reservations: not authorized (%).', coalesce(caller, 'anon');
   end if;
 
+  /* requested 가 줄어드는 이유가 두 가지다 — 날짜 파싱 실패와 res_key 중복.
+     둘을 합쳐 놓으면 로그만 보고는 원인을 알 수 없어서 따로 센다. */
+  select count(*) into parsed
+  from jsonb_array_elements(coalesce(records, '[]'::jsonb)) t(e)
+  where public.ymd_date(t.e ->> '예약일자') is not null;
+
   select count(*) into usable from public._norm_reservations(records);
 
   -- 날짜 파싱 실패로 버린 건 → 미매칭처럼 로그에 남긴다(조용히 사라지지 않게)
-  if req > usable then
+  if req > parsed then
     select coalesce(jsonb_agg(jsonb_build_object(
              '사유', '예약일자 파싱 실패',
              '이름', t.e ->> '이름', '예약일자', t.e ->> '예약일자')), '[]'::jsonb)
@@ -227,6 +234,8 @@ begin
 
   return jsonb_build_object(
     'requested',   req,
+    'parsed',      parsed,          -- 날짜를 읽은 건수 (req - parsed = 파싱 실패)
+    'duplicates',  parsed - usable, -- res_key 가 겹쳐 접힌 건수
     'usable',      usable,
     'saved',       saved,
     'skipped',     skipped,

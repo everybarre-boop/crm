@@ -86,6 +86,9 @@ export const SELECTORS = {
     /* ⚠️ li 만으로 잡으면 안 된다 — 예약상태 드롭다운의 옵션(취소/출석/결석/노쇼)도
           li 라서 11명짜리 수업에서 55개가 잡힌다. 반드시 .members-list-item 을 쓴다. */
     list: 'li.members-list-item',
+    /* "예약회원 (11명)" — 목록이 **다 그려졌는지** 판정하는 기대값.
+       이게 없으면 렌더 도중에 세어 실행마다 인원이 달라진다(실측: 78/96/88). */
+    countLabel: 'h5:has-text("예약회원")',
   },
   booking: {
     /** "박진화 · 010-3850-9069" — normalize 가 이름/연락처로 쪼갠다 */
@@ -111,6 +114,8 @@ export const TIMING = {
   waitTimeout: 25000,
   /** 캘린더가 날짜를 다시 그릴 때까지의 여유 */
   daySettle: 700,
+  /** "수업 0개"로 보일 때 한 번 더 기다리는 간격 — 0 을 휴무일로 오인하지 않기 위함 */
+  emptySettle: 1200,
   /** 상세 페이지 렌더 여유 */
   detailSettle: 400,
 };

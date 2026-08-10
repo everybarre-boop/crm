@@ -229,8 +229,27 @@ async function readLecture(page, fallbackDate) {
   const 강사 = await text(page, SELECTORS.detail.강사);
   const { 예약일자, 수업시간 } = parseLectureDateTime(await text(page, SELECTORS.detail.일시));
 
+  /* ⚠️ 목록이 다 그려지기 전에 세면 실행마다 인원이 달라진다(실측: 같은 날이 78/96/88).
+     화면의 "예약회원 (N명)" 이 정답이므로 그 수에 도달할 때까지 기다린다. */
   const rows = page.locator(SELECTORS.bookings.list);
-  const n = await rows.count();
+  const labelText = await text(page, SELECTORS.bookings.countLabel);
+  const expected = Number((labelText.match(/\((\d+)\s*명/) || [])[1] ?? NaN);
+
+  let n = await rows.count();
+  if (Number.isFinite(expected)) {
+    const deadline = Date.now() + TIMING.waitTimeout;
+    while (n < expected && Date.now() < deadline) {
+      await page.waitForTimeout(200);
+      n = await rows.count();
+    }
+    if (n !== expected) {
+      throw new Error(
+        `예약자 목록이 안 맞습니다 — 화면은 ${expected}명인데 ${n}명만 읽혔습니다 ` +
+          `(${수업명} ${수업시간}). 조용히 넘기면 그만큼 CRM 에서 빠집니다.`,
+      );
+    }
+  }
+
   const out = [];
   for (let i = 0; i < n; i++) {
     const row = rows.nth(i);
@@ -273,26 +292,51 @@ export async function scrapeBranch(page, site, { date }) {
   });
   await gotoDate(page, date);
 
+  /* ⚠️ 날짜 input 은 즉시 바뀌지만 수업 블록은 API 응답 뒤에 그려진다.
+     바로 세면 0 이 나오고, 0 은 "휴무일"로 취급돼 **조용히 넘어간다**
+     (실측: 실제 12개인 날을 0개로 읽었다). 잠깐 더 기다렸다 다시 센다. */
   const items = page.locator(SELECTORS.calendar.classItem);
-  const 수업수 = await items.count();
+  await page.waitForLoadState('networkidle', { timeout: TIMING.waitTimeout }).catch(() => {});
+  let 수업수 = await items.count();
+  for (let i = 0; 수업수 === 0 && i < 4; i++) {
+    await page.waitForTimeout(TIMING.emptySettle);
+    수업수 = await items.count();
+  }
   const rows = [];
 
-  for (let i = 0; i < 수업수; i++) {
-    await items.nth(i).click({ timeout: TIMING.waitTimeout });
-    await page.waitForURL(/\/lecture\/detail/, { timeout: TIMING.waitTimeout });
+  /* ⚠️ 수업 블록에는 안정적인 id/href 가 없어 nth(i) 로 도는데, **뒤로 가면 DOM 순서가
+     바뀔 수 있다.** 실측에서 같은 수업을 두 번 긁고 어떤 건 빠뜨려, 같은 날짜를 두 번
+     돌렸더니 예약자 수가 78 → 96 으로 달라졌다.
+     → 상세 URL 의 lecture id 로 중복을 제거하고, 못 본 수업이 남으면 한 번 더 훑는다. */
+  const seen = new Set();
+  for (let pass = 0; pass < 2 && seen.size < 수업수; pass++) {
+    const n = await items.count();
+    for (let i = 0; i < n; i++) {
+      await items.nth(i).click({ timeout: TIMING.waitTimeout });
+      await page.waitForURL(/\/lecture\/detail/, { timeout: TIMING.waitTimeout });
 
-    const raws = await readLecture(page, date);
-    for (const raw of raws) {
-      rows.push(toReservationRecord(raw, { branch: site.defaultBranch, date }));
+      const id = new URL(page.url()).searchParams.get('id') || `#${pass}-${i}`;
+      if (!seen.has(id)) {
+        seen.add(id);
+        for (const raw of await readLecture(page, date)) {
+          rows.push(toReservationRecord(raw, { branch: site.defaultBranch, date }));
+        }
+      }
+
+      await page.goBack({ waitUntil: 'domcontentloaded', timeout: TIMING.navTimeout });
+      await page
+        .locator(SELECTORS.calendar.classItem)
+        .first()
+        .waitFor({ timeout: TIMING.waitTimeout })
+        .catch(() => {});
+      /* 이 SPA 는 ?date= 를 무시하므로 뒤로 가면 캘린더가 오늘로 되돌아갈 수 있다. */
+      if ((await currentDate(page)) !== date) await gotoDate(page, date);
+      if (seen.size >= 수업수) break;
     }
-
-    await page.goBack({ waitUntil: 'domcontentloaded', timeout: TIMING.navTimeout });
-    await page.locator(SELECTORS.calendar.classItem).first().waitFor({ timeout: TIMING.waitTimeout });
-    /* ⚠️ 이 SPA 는 ?date= 를 무시하므로, 뒤로 가면 캘린더가 오늘로 되돌아갈 수 있다.
-       매번 확인해서 어긋나면 다시 이동한다(대개 한두 칸이라 싸다). */
-    if ((await currentDate(page)) !== date) await gotoDate(page, date);
   }
 
   const missing = rows.length ? WANTED.filter((f) => rows.every((r) => !r[f])) : [];
-  return { rows, 수업수, missing };
+  // 못 본 수업이 있으면 조용히 넘기지 않는다
+  const 누락 = 수업수 - seen.size;
+  return { rows, 수업수, 누락: 누락 > 0 ? 누락 : 0, missing };
 }

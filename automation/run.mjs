@@ -135,7 +135,7 @@ async function collect(mode, date) {
   for (const site of SITES) {
     try {
       await ensureLogin(page, site.slug);
-      const { rows, 수업수, missing } = await scrapeBranch(page, site, { date, mode });
+      const { rows, 수업수, 누락, missing } = await scrapeBranch(page, site, { date, mode });
       for (const r of rows) {
         const b = r.지점 || '(미지정)';
         if (env.ONLY_BRANCHES.length && !env.ONLY_BRANCHES.includes(b)) continue;
@@ -148,6 +148,10 @@ async function collect(mode, date) {
         `[scrape:${mode}] ${site.label} ${date}: 수업 ${수업수}개 · 예약자 ${rows.length}명 (${perBranch})` +
           (수업수 > 0 && rows.length === 0 ? '  ⚠️ 수업은 있는데 예약자 0명 — 셀렉터 의심' : ''),
       );
+      if (누락) {
+        // 조용히 지나가면 그 수업 예약자가 통째로 빠진 채 CRM 이 나간다
+        fail(`scrape:${mode}`, site.label, new Error(`수업 ${수업수}개 중 ${누락}개를 못 열었습니다`));
+      }
       if (missing.length) {
         console.warn(`  ⚠️ ${site.label}: 못 읽은 필드 ${missing.join(', ')} (selectors.mjs 확인)`);
       }
@@ -209,8 +213,17 @@ async function stepRoster(tomorrow, dryRun) {
     if (!rows.length) continue;
     try {
       const res = await saveReservations(rows, { branch, targetDate: tomorrow, dryRun });
+      const 손실 = [
+        res.requested - (res.parsed ?? res.usable) > 0
+          ? `날짜 파싱 실패 ${res.requested - res.parsed}건`
+          : '',
+        res.duplicates ? `중복 ${res.duplicates}건` : '',
+      ]
+        .filter(Boolean)
+        .join(' · ');
       console.log(
-        `[resv] ${branch}: ${res.requested}건 중 ${res.usable}건 유효` +
+        `[resv] ${branch}: ${res.requested}건 → ${res.usable}건` +
+          (손실 ? ` (${손실})` : '') +
           (res.dry_run ? ' (dry-run)' : ` / 저장 ${res.saved}건`),
       );
     } catch (err) {
