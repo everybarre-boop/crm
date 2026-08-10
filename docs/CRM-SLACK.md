@@ -61,30 +61,62 @@ v2 는 입력 1건당 members 1행만 고른다(수강권시작일 정확 일치
 
 | 이름 | 값 |
 |---|---|
-| `SUPABASE_URL` / `SUPABASE_ANON_KEY` | 앱과 동일(공개값이지만 Secrets 로 주입) |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | 관리자 계정 — **비밀** |
-| `STUDIOMATE_EMAIL` / `STUDIOMATE_PASSWORD` | 스튜디오메이트 로그인 |
-| `SM_SLUG_CHEONGDAM` … `SM_SLUG_SONGPA` | 지점별 사이트 식별자 |
+| `STUDIOMATE_PHONE` / `STUDIOMATE_PASSWORD` | ⚠️ 이메일이 아니라 **휴대폰 번호**로 로그인한다 |
 | `SLACK_BOT_TOKEN` | `xoxb-…` |
-| `SLACK_CHANNEL_CHEONGDAM` … `SLACK_CHANNEL_SONGPA` | 지점 채널 **ID** |
+| `SLACK_CHANNEL_CHEONGDAM` … `SLACK_CHANNEL_SONGPA` | 지점 채널 **ID** (6개) |
 | `SLACK_CHANNEL_OPS` | 실패 알림 채널 **ID** |
 
-### 1-4. 스크래퍼 셀렉터
+`SUPABASE_URL` / `SUPABASE_ANON_KEY` 는 공개값이고 `automation/config.mjs` 에 기본값이 있어
+생략해도 된다. `SM_SLUG_*` 도 마찬가지(공개 서브도메인) — 다른 스튜디오로 옮길 때만 쓴다.
 
-`automation/studiomate/selectors.mjs` **한 파일만** 채우면 된다. 나머지 코드(`scrape.mjs`)는
-셀렉터를 전혀 모르고 필드맵을 순회할 뿐이라 화면이 바뀌어도 손댈 필요가 없다.
+### 1-4. 사이트 구조 (2026-08-10 실측)
+
+**⚠️ 사이트와 지점이 1:1 이 아니다.**
+
+| 사이트 | 지점 |
+|---|---|
+| `everybarre.studiomate.kr` | **청담 + 판교** (일간·룸별 뷰의 룸 컬럼이 지점) |
+| `everybarre-gwanggyo` | 광교 |
+| `everybarre-oksu` | 옥수 |
+| `everybarre-banpo` | 반포 |
+| `everybarre-songpa` | 송파 |
+
+그래서 스크랩 단위는 "지점"이 아니라 **"사이트"**(`config.mjs` 의 `SITES`)이고,
+각 예약행의 지점은 **수강권명에서 뽑는다**(`branchOf` — CLAUDE.md "지점은 수강권명 안에 있다").
+수강권명에 지점 태그가 없으면 사이트의 `defaultBranch` 로 폴백한다.
+사이트마다 세션이 따로라 **사이트별로 각각 로그인**한다(쿠키가 서브도메인 간 공유되지 않는다).
+
+### 1-5. 스크래퍼 셀렉터
+
+`automation/studiomate/selectors.mjs` **한 파일만** 고치면 된다. `scrape.mjs` 는 흐름만 담당하고
+셀렉터를 전혀 모른다. 2026-08-10 기준으로 이미 실제 값이 채워져 있다.
+
+화면 흐름:
+
+```
+/schedule (일간·룸별)  →  .event-item 클릭  →  /lecture/detail?id=…  →  뒤로
+```
+
+- **날짜는 URL 쿼리(`?date=`)로 못 바꾼다 — 무시된다.** 좌/우 화살표로만 이동하며,
+  `gotoDate()` 가 현재 날짜를 읽어 목표까지 한 칸씩 이동하고 매번 검증한다.
+- **수업 상세 한 페이지에 필요한 게 전부 있다** — 이름·연락처·수강권명·잔여횟수·수강권기간·
+  예약상태. 회원 상세 모달에 따로 들어가지 않는다.
+- **전체횟수는 화면 어디에도 없다**("12회 남음"만). 그래서 스크래퍼는 전체횟수를 빈 값으로
+  보내고 `apply_attendance` v2 가 `coalesce` 로 DB 기존 값을 유지한다. 전체횟수는 등록 시점
+  확정값이고 주간 엑셀 재업로드로 교정되므로 매일 갱신할 필요가 없다.
+- 예약상태는 텍스트가 아니라 **readonly `input` 의 value** 다(Element UI 셀렉트).
+  어휘: `예약 / 출석 / 결석 / 노쇼 / 취소`.
+- 예약자 행은 반드시 `li.members-list-item` 으로 잡는다 — `li` 만 쓰면 상태 드롭다운 옵션까지
+  잡혀서 11명짜리 수업이 55개가 된다.
 
 ```bash
 # 창을 띄워 놓고 직접 확인
-HEADLESS=false ONLY_BRANCHES=광교 STEPS=roster DRY_RUN=true node automation/run.mjs
-# 또는 클릭 경로 녹화
-npx playwright codegen https://<slug>.studiomate.kr
+HEADLESS=false ONLY_BRANCHES=광교 DRY_RUN=true node automation/run.mjs
 ```
 
-채우는 순서는 **roster(단순) → attendance(수강권 모달까지, 복잡)**.
-값은 문자열(CSS 셀렉터), 함수(`async (scope, page) => string`), `null`(아직 모름) 셋 다 된다.
-`null` 로 두면 그 필드는 빈 값이 되고 실행 요약에 `못 읽은 필드` 경고가 뜬다 — **한 번에 다
-채우지 않아도 파이프라인을 돌려볼 수 있다.**
+셀렉터 값은 문자열(CSS), 함수(`async (scope) => string`), `null`(아직 모름) 셋 다 된다.
+`null` 이면 그 필드만 비고 실행 요약에 `못 읽은 필드` 경고가 뜬다.
 
 ---
 

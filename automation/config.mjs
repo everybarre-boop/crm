@@ -81,8 +81,10 @@ export const env = {
   ADMIN_EMAIL: process.env.ADMIN_EMAIL || '',
   ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || '',
 
-  // 스튜디오메이트 로그인(스크래핑용). MOCK_FILE 을 쓰면 없어도 된다.
-  STUDIOMATE_EMAIL: process.env.STUDIOMATE_EMAIL || '',
+  /* 스튜디오메이트 로그인(스크래핑용). MOCK_FILE 을 쓰면 없어도 된다.
+     ⚠️ 이메일이 아니라 **휴대폰 번호**로 로그인한다(2026-08 실제 화면 확인).
+        옛 이름 STUDIOMATE_EMAIL 도 읽어 준다 — 이미 등록한 Secret 이 있으면 그대로 쓰라고. */
+  STUDIOMATE_PHONE: process.env.STUDIOMATE_PHONE || process.env.STUDIOMATE_EMAIL || '',
   STUDIOMATE_PASSWORD: process.env.STUDIOMATE_PASSWORD || '',
 
   // 슬랙 (Bot Token. 발송 전용 — 인터랙션 엔드포인트는 만들지 않는다)
@@ -103,17 +105,38 @@ export const env = {
   RUN_URL: process.env.RUN_URL || '', // GitHub Actions run 링크(실패 알림에 첨부)
 };
 
-/* 지점 목록 — 스튜디오메이트 사이트 식별자(slug)와 슬랙 채널 ID.
-   ⚠️ 슬랙 채널은 **이름(#광교)이 아니라 ID(C0123ABCD)** 를 넣는다.
-      이름은 바뀌면 조용히 실패하고, 그러면 그 지점만 CRM 이 끊긴다. */
+/* 지점 — 슬랙 발송 단위. 채널은 **이름(#광교)이 아니라 ID(C0123ABCD)** 를 넣는다.
+   이름은 바뀌면 조용히 실패하고, 그러면 그 지점만 CRM 이 끊긴다. */
 export const BRANCHES = [
-  { name: '청담', slug: process.env.SM_SLUG_CHEONGDAM || '', slack: process.env.SLACK_CHANNEL_CHEONGDAM || '' },
-  { name: '옥수', slug: process.env.SM_SLUG_OKSU     || '', slack: process.env.SLACK_CHANNEL_OKSU     || '' },
-  { name: '광교', slug: process.env.SM_SLUG_GWANGGYO || '', slack: process.env.SLACK_CHANNEL_GWANGGYO || '' },
-  { name: '반포', slug: process.env.SM_SLUG_BANPO    || '', slack: process.env.SLACK_CHANNEL_BANPO    || '' },
-  { name: '판교', slug: process.env.SM_SLUG_PANGYO   || '', slack: process.env.SLACK_CHANNEL_PANGYO   || '' },
-  { name: '송파', slug: process.env.SM_SLUG_SONGPA   || '', slack: process.env.SLACK_CHANNEL_SONGPA   || '' },
+  { name: '청담', slack: process.env.SLACK_CHANNEL_CHEONGDAM || '' },
+  { name: '옥수', slack: process.env.SLACK_CHANNEL_OKSU || '' },
+  { name: '광교', slack: process.env.SLACK_CHANNEL_GWANGGYO || '' },
+  { name: '반포', slack: process.env.SLACK_CHANNEL_BANPO || '' },
+  { name: '판교', slack: process.env.SLACK_CHANNEL_PANGYO || '' },
+  { name: '송파', slack: process.env.SLACK_CHANNEL_SONGPA || '' },
 ].filter((b) => !env.ONLY_BRANCHES.length || env.ONLY_BRANCHES.includes(b.name));
+
+/* 스튜디오메이트 사이트 — ⚠️ 지점과 1:1 이 아니다.
+   **청담과 판교는 `everybarre` 한 사이트를 같이 쓴다**(일간·룸별 뷰의 룸 컬럼이 지점이다).
+   그래서 스크랩 단위는 "지점"이 아니라 "사이트"이고, 각 예약행의 지점은
+   수강권명에서 뽑는다(branchOf). 태그가 없으면 defaultBranch 로 폴백.
+
+   slug 는 비밀이 아니라 공개 서브도메인이라 기본값을 코드에 둔다(Secrets 6개가 준다).
+   다른 스튜디오로 옮기면 SM_SLUG_* 환경변수로 덮어쓸 수 있다. */
+export const SITES = [
+  {
+    slug: process.env.SM_SLUG_MAIN || 'everybarre',
+    label: '청담·판교',
+    branches: ['청담', '판교'],
+    defaultBranch: '청담',
+  },
+  { slug: process.env.SM_SLUG_GWANGGYO || 'everybarre-gwanggyo', label: '광교', branches: ['광교'], defaultBranch: '광교' },
+  { slug: process.env.SM_SLUG_OKSU     || 'everybarre-oksu',     label: '옥수', branches: ['옥수'], defaultBranch: '옥수' },
+  { slug: process.env.SM_SLUG_BANPO    || 'everybarre-banpo',    label: '반포', branches: ['반포'], defaultBranch: '반포' },
+  { slug: process.env.SM_SLUG_SONGPA   || 'everybarre-songpa',   label: '송파', branches: ['송파'], defaultBranch: '송파' },
+].filter(
+  (s) => !env.ONLY_BRANCHES.length || s.branches.some((b) => env.ONLY_BRANCHES.includes(b)),
+);
 
 /* ----------------------------------------------------------------------
    preflight — 실행에 필요한 설정이 다 있는지 **시작 전에** 확인한다.
@@ -132,11 +155,9 @@ export function preflight() {
 
   const needsScrape = steps.includes('attendance') || steps.includes('roster');
   if (needsScrape && !env.MOCK_FILE) {
-    if (!env.STUDIOMATE_EMAIL) missing.push('STUDIOMATE_EMAIL');
+    if (!env.STUDIOMATE_PHONE) missing.push('STUDIOMATE_PHONE (휴대폰 번호로 로그인합니다)');
     if (!env.STUDIOMATE_PASSWORD) missing.push('STUDIOMATE_PASSWORD');
-    const noSlug = BRANCHES.filter((b) => !b.slug).map((b) => b.name);
-    if (noSlug.length === BRANCHES.length) missing.push('SM_SLUG_* (전 지점 미설정)');
-    else if (noSlug.length) warn.push(`slug 미설정으로 건너뛸 지점: ${noSlug.join(', ')}`);
+    if (!SITES.length) missing.push('스크랩할 사이트가 없습니다 (ONLY_BRANCHES 확인)');
   }
 
   if (steps.includes('slack') && !env.SLACK_DRY_RUN) {

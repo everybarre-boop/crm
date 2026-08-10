@@ -294,9 +294,26 @@ CSV 는 Excel 열람을 전제하므로 `=` `+` `-` `@` 로 시작하는 셀 값
 - **`DRY_RUN` 은 엄격 파싱한다**(`parseBool`). 옛 코드는 `!== 'false'` 라서 `DRY_RUN=1`·오타가
   전부 조용히 `true`(=아무것도 안 함)가 됐다 — 밤새 아무 일도 없었는데 아침에 초록불만 남았다.
 - **스크래퍼 셀렉터는 [automation/studiomate/selectors.mjs](automation/studiomate/selectors.mjs)
-  한 파일에만 둔다.** `scrape.mjs` 는 필드맵을 순회할 뿐 셀렉터를 모른다. 값은 문자열(CSS)/
-  함수/`null`(미설정) 셋 다 되고, `null` 이면 그 필드만 비고 경고가 뜬다 — 한 번에 다 채우지
-  않아도 파이프라인을 돌려볼 수 있다.
+  한 파일에만 둔다.** `scrape.mjs` 는 흐름만 담당하고 셀렉터를 모른다. 값은 문자열(CSS)/
+  함수/`null`(미설정) 셋 다 되고, `null` 이면 그 필드만 비고 경고가 뜬다.
+- 🔥 **스튜디오메이트 실측(2026-08-10) — 가정과 달랐던 것들:**
+  - **사이트 ≠ 지점.** `everybarre.studiomate.kr` 하나에 **청담·판교가 같이** 있다
+    (일간·룸별 뷰의 룸 컬럼이 지점). 나머지는 `everybarre-{gwanggyo,oksu,banpo,songpa}`.
+    그래서 스크랩 단위는 `config.mjs` 의 **`SITES`**(지점 아님)이고, 각 예약행의 지점은
+    **수강권명에서 뽑는다**(`branchOf`). 사이트마다 세션이 따로라 **사이트별로 로그인**한다.
+  - **로그인은 이메일이 아니라 휴대폰 번호**(`STUDIOMATE_PHONE`, `input#mobileRequired`).
+  - **날짜는 `?date=` 쿼리로 못 바꾼다 — 무시된다.** 좌/우 화살표로 한 칸씩 이동하며 매번
+    `.el-date-editor input` 값으로 검증한다(`gotoDate`).
+  - **수업 상세 한 페이지(`/lecture/detail?id=`)에 필요한 게 전부 있다** — 이름·연락처·
+    수강권명·잔여횟수·수강권기간·예약상태. 회원 상세 모달에 들어갈 필요가 없다.
+  - ⚠️ **전체횟수는 화면 어디에도 없다**("12회 남음"만). 스크래퍼는 빈 값으로 보내고
+    `apply_attendance` v2 가 `coalesce(tgt.tot, mem."전체횟수")` 로 DB 값을 유지한다.
+    **이 coalesce 를 빼면 전체횟수가 통째로 비워져 `used_count` 가 음수가 된다.**
+    수강권명의 "40회" 같은 명목값을 대신 넣지 말 것 — 횟수 조정된 회원이 틀어진다.
+  - 예약상태는 텍스트가 아니라 **readonly `input` 의 value**(Element UI 셀렉트).
+    어휘: `예약/출석/결석/노쇼/취소`. 예약자 행은 반드시 `li.members-list-item` 으로 잡는다
+    (`li` 만 쓰면 상태 드롭다운 옵션까지 잡혀 11명이 55개가 된다).
+  - **과거 날짜 조회 가능** → `reservations` 백필로 "14일 미방문"을 첫날부터 낼 수 있다.
 - **전 지점 스크랩 실패는 fatal 이다.** 로그인 실패를 "예약자 0명"으로 오해하면 아무 일도 안
   일어난 채 초록불만 남는다(옛 `run.mjs` 의 실제 문제). 1~2지점 실패는 나머지 진행 + `exit 1`.
 - **규칙 변경 시 [automation/test/rules.test.mjs](automation/test/rules.test.mjs)가 먼저 깨져야

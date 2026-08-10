@@ -22,7 +22,7 @@
 //   DRY_RUN=false node automation/run.mjs
 // ============================================================================
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { BRANCHES, env, preflight } from './config.mjs';
+import { BRANCHES, SITES, env, preflight } from './config.mjs';
 import { applyAttendance } from './apply.mjs';
 import { saveReservations } from './db.mjs';
 import { buildAndSaveCrm, postCrmToSlack } from './crm.mjs';
@@ -75,21 +75,28 @@ async function mockRows(mode, date) {
 
 let _browser = null;
 let _page = null;
+const _loggedIn = new Set();
 
 async function getPage() {
   if (_page) return _page;
   const { chromium } = await import('playwright');
-  const { loginStudioMate } = await import('./studiomate.mjs');
   _browser = await chromium.launch({ headless: env.HEADLESS });
   const ctx = await _browser.newContext();
   _page = await ctx.newPage();
-  const first = BRANCHES.find((b) => b.slug);
-  await loginStudioMate(_page, {
-    email: env.STUDIOMATE_EMAIL,
-    password: env.STUDIOMATE_PASSWORD,
-    slug: first?.slug || '',
-  });
   return _page;
+}
+
+/* 사이트(서브도메인)마다 세션이 따로다 — 쿠키가 공유되지 않으므로 각각 로그인한다.
+   실행당 사이트별 1회만. */
+async function ensureLogin(page, slug) {
+  if (_loggedIn.has(slug)) return;
+  const { loginStudioMate } = await import('./studiomate.mjs');
+  await loginStudioMate(page, {
+    phone: env.STUDIOMATE_PHONE,
+    password: env.STUDIOMATE_PASSWORD,
+    slug,
+  });
+  _loggedIn.add(slug);
 }
 
 async function closeBrowser() {
@@ -121,29 +128,37 @@ async function collect(mode, date) {
 
   const { scrapeBranch } = await import('./studiomate.mjs');
   const page = await getPage();
-  const targets = BRANCHES.filter((b) => b.slug);
   let okCount = 0;
 
-  for (const branch of targets) {
+  /* ⚠️ 스크랩 단위는 "지점"이 아니라 "사이트"다 — 청담·판교가 everybarre 한 곳을 같이 쓴다.
+     지점은 각 예약행의 수강권명에서 뽑히므로(branchOf), 여기서는 반환된 rows 를 지점별로 나눈다. */
+  for (const site of SITES) {
     try {
-      const { rows, 수업수, missing } = await scrapeBranch(page, branch, { date, mode });
-      byBranch.set(branch.name, rows);
+      await ensureLogin(page, site.slug);
+      const { rows, 수업수, missing } = await scrapeBranch(page, site, { date, mode });
+      for (const r of rows) {
+        const b = r.지점 || '(미지정)';
+        if (env.ONLY_BRANCHES.length && !env.ONLY_BRANCHES.includes(b)) continue;
+        if (!byBranch.has(b)) byBranch.set(b, []);
+        byBranch.get(b).push(r);
+      }
       okCount++;
+      const perBranch = [...new Set(rows.map((r) => r.지점 || '(미지정)'))].join('/') || '-';
       console.log(
-        `[scrape:${mode}] ${branch.name} ${date}: 수업 ${수업수}개 · 예약자 ${rows.length}명` +
+        `[scrape:${mode}] ${site.label} ${date}: 수업 ${수업수}개 · 예약자 ${rows.length}명 (${perBranch})` +
           (수업수 > 0 && rows.length === 0 ? '  ⚠️ 수업은 있는데 예약자 0명 — 셀렉터 의심' : ''),
       );
       if (missing.length) {
-        console.warn(`  ⚠️ ${branch.name}: 못 읽은 필드 ${missing.join(', ')} (selectors.mjs 확인)`);
+        console.warn(`  ⚠️ ${site.label}: 못 읽은 필드 ${missing.join(', ')} (selectors.mjs 확인)`);
       }
     } catch (err) {
-      fail(`scrape:${mode}`, branch.name, err);
+      fail(`scrape:${mode}`, site.label, err);
     }
   }
 
-  if (targets.length && okCount === 0) {
+  if (SITES.length && okCount === 0) {
     throw new Error(
-      `전 지점(${targets.length}곳) 스크랩이 실패했습니다 — 로그인 또는 화면 구조 문제로 보입니다.`,
+      `전 사이트(${SITES.length}곳) 스크랩이 실패했습니다 — 로그인 또는 화면 구조 문제로 보입니다.`,
     );
   }
   return byBranch;

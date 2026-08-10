@@ -1,185 +1,179 @@
 // ============================================================================
-// 스튜디오메이트 스크래핑 — 흐름만 담당한다 (셀렉터를 하나도 모른다)
+// 스튜디오메이트 스크래핑 — 흐름만 담당한다 (셀렉터는 selectors.mjs 에만 있다)
 // ----------------------------------------------------------------------------
-// 이 파일은 selectors.mjs 의 값을 **데이터로만** 다룬다(필드맵 순회). 화면 구조가 바뀌면
-// selectors.mjs 만 고치면 되고 여기는 손대지 않는다.
+// 실제 화면 흐름 (2026-08-10 확인):
+//   /schedule (일간·룸별)  →  .event-item 클릭  →  /lecture/detail?id=…  →  뒤로
 //
-// mode:
-//   'roster'     내일(D+1) 예약자 명단. 목록만 읽는다 — 회원 상세를 열지 않아 빠르다.
-//                (잔여/종료일은 members DB 가 더 정확하다. 같은 실행의 직전 단계에서
-//                 D-1 출석을 반영했고, 주 1회 엑셀 재업로드로 교정까지 되기 때문.)
-//   'attendance' 어제(D-1) 출석/결석 확정. 회원 상세(수강권 모달)까지 열어 전체/잔여를 읽는다.
+// ⚠️ 날짜는 URL 쿼리(?date=)로 못 바꾼다 — 무시된다. 좌/우 화살표로만 이동한다.
+//    그래서 gotoDate() 가 현재 날짜를 읽어 목표까지 한 칸씩 이동하고 매번 검증한다.
+//
+// ⚠️ 수업 상세 한 페이지에 이름·연락처·수강권명·잔여횟수·수강권기간·예약상태가 전부 있다.
+//    회원 상세 모달에 따로 들어가지 않는다(클릭 수가 수백 회 줄어든다).
+//    전체횟수만 화면에 없어서 빈 값으로 두고, apply_attendance v2 가 DB 값을 유지한다.
 // ============================================================================
-import { SELECTORS, URLS, TIMING, selectorsReady } from './selectors.mjs';
-import { normText, toReservationRecord } from './normalize.mjs';
+import { SELECTORS, TIMING, URLS, selectorsReady } from './selectors.mjs';
+import {
+  normDate,
+  normText,
+  parseLectureDateTime,
+  parseMemberLine,
+  parseTicketLine,
+  toReservationRecord,
+} from './normalize.mjs';
+import { daysBetween } from '../../shared/crm-core.mjs';
 
-/* 스크랩이 채워야 하는 필드 — 전 행이 비어 있으면 "셀렉터 미설정"으로 경고한다.
-   (한 번에 다 채우지 않아도 파이프라인을 돌려볼 수 있게 하려는 장치) */
-const WANTED = {
-  roster: ['수업시간', '수업명', '이름', '수강권명'],
-  attendance: ['수업시간', '수업명', '이름', '수강권명', '예약상태', '전체횟수', '잔여횟수'],
-};
+/* 스크랩이 채워야 하는 필드 — 전 행이 비어 있으면 "셀렉터 미설정"으로 경고한다. */
+const WANTED = ['수업시간', '수업명', '이름', '연락처', '수강권명', '예약상태', '잔여횟수'];
 
-/** 셀렉터 값 하나를 읽는다. 문자열=CSS, 함수=커스텀, null=미설정('' 반환). */
-async function readOne(scope, sel, page) {
+async function text(scope, sel) {
   if (!sel) return '';
-  if (typeof sel === 'function') return normText(await sel(scope, page));
+  if (typeof sel === 'function') return normText(await sel(scope));
   const loc = scope.locator(sel).first();
   if ((await loc.count()) === 0) return '';
   return normText(await loc.textContent());
 }
 
-/** 필드맵({필드명: 셀렉터})을 통째로 읽는다. */
-async function readFields(scope, map, page) {
-  const out = {};
-  for (const [field, sel] of Object.entries(map || {})) {
-    out[field] = await readOne(scope, sel, page);
-  }
-  return out;
-}
-
-/** 빈 값은 빼고 병합 — 목록에서 이미 읽은 값을 상세가 빈 값으로 덮어쓰지 않게. */
-function mergeNonEmpty(base, extra) {
-  for (const [k, v] of Object.entries(extra || {})) {
-    if (v !== '' && v != null) base[k] = v;
-  }
-  return base;
-}
-
-async function closeOverlay(page, closeSel) {
-  if (closeSel) {
-    const loc = page.locator(closeSel).first();
-    if (await loc.count()) {
-      await loc.click().catch(() => {});
-      await page.waitForTimeout(TIMING.modalSettle);
-      return;
-    }
-  }
-  await page.keyboard.press('Escape').catch(() => {});
-  await page.waitForTimeout(TIMING.modalSettle);
-}
-
 /* ----------------------------------------------------------------------
    로그인
-   ⚠️ 옛 코드는 baseUrl('') 을 호출해 `https://.studiomate.kr` 로 갔다가 조용히 실패했다.
-      이제는 slug 를 받고, 로그인 후에도 비밀번호 입력칸이 남아 있으면 **에러를 던진다.**
-      (로그인 실패를 "예약자 0명"으로 오해하면 전 지점이 조용히 비게 된다)
+   ⚠️ 스튜디오메이트는 **이메일이 아니라 휴대폰 번호**로 로그인한다.
+   ⚠️ 로그인 후에도 비밀번호 입력칸이 남아 있으면 실패로 본다 — 로그인 실패를
+      "예약자 0명"으로 오해하면 아무 일도 안 일어난 채 초록불만 남는다.
    ---------------------------------------------------------------------- */
-export async function loginStudioMate(page, { email, password, slug = '' }) {
+export async function loginStudioMate(page, { phone, password, slug }) {
   await page.goto(URLS.login(slug), {
     waitUntil: 'domcontentloaded',
     timeout: TIMING.navTimeout,
   });
-  await page.fill(SELECTORS.login.email, email, { timeout: TIMING.waitTimeout });
+  await page.fill(SELECTORS.login.phone, phone, { timeout: TIMING.waitTimeout });
   await page.fill(SELECTORS.login.password, password, { timeout: TIMING.waitTimeout });
   await page.click(SELECTORS.login.submit, { timeout: TIMING.waitTimeout });
 
   if (SELECTORS.login.success) {
-    await page.locator(SELECTORS.login.success).first().waitFor({ timeout: TIMING.waitTimeout });
-  } else {
-    await page.waitForLoadState('networkidle', { timeout: TIMING.waitTimeout }).catch(() => {});
+    await page
+      .locator(SELECTORS.login.success)
+      .first()
+      .waitFor({ timeout: TIMING.waitTimeout })
+      .catch(() => {});
   }
+  await page.waitForLoadState('networkidle', { timeout: TIMING.waitTimeout }).catch(() => {});
 
   if (await page.locator(SELECTORS.login.password).count()) {
     throw new Error(
-      '스튜디오메이트 로그인 실패 — 계정/비밀번호 또는 selectors.mjs 의 login 셀렉터를 확인하세요.',
+      `[${slug}] 스튜디오메이트 로그인 실패 — 휴대폰 번호/비밀번호 또는 login 셀렉터를 확인하세요.`,
     );
   }
 }
 
 /* ----------------------------------------------------------------------
-   한 지점의 하루치 예약자 수집
+   날짜 이동 — 화살표를 한 칸씩 누르며 매번 검증한다.
+   ---------------------------------------------------------------------- */
+async function currentDate(page) {
+  const loc = page.locator(SELECTORS.calendar.dateInput).first();
+  await loc.waitFor({ timeout: TIMING.waitTimeout });
+  return normDate(await loc.inputValue());
+}
+
+async function gotoDate(page, target) {
+  // 일간(룸별) 뷰가 아니면 .event-item 배치가 달라진다 → 먼저 고정
+  const radio = page.locator(SELECTORS.calendar.dayRoomViewRadio).first();
+  if ((await radio.count()) && !(await radio.isChecked())) {
+    await page.locator(SELECTORS.calendar.dayRoomViewLabel).first().click();
+    await page.waitForTimeout(TIMING.daySettle);
+  }
+
+  let cur = await currentDate(page);
+  for (let guard = 0; cur !== target && guard < 60; guard++) {
+    const diff = daysBetween(cur, target);
+    if (diff === null) throw new Error(`날짜를 읽지 못했습니다 (현재="${cur}", 목표="${target}")`);
+    await page
+      .locator(diff > 0 ? SELECTORS.calendar.nextDay : SELECTORS.calendar.prevDay)
+      .first()
+      .click({ timeout: TIMING.waitTimeout });
+    await page.waitForTimeout(TIMING.daySettle);
+    const next = await currentDate(page);
+    if (next === cur) {
+      throw new Error(`날짜 이동이 동작하지 않습니다 (${cur} 에서 멈춤). 화살표 셀렉터 확인.`);
+    }
+    cur = next;
+  }
+  if (cur !== target) throw new Error(`목표 날짜에 도달하지 못했습니다 (${cur} ≠ ${target})`);
+}
+
+/* ----------------------------------------------------------------------
+   수업 상세 한 건 읽기
+   ---------------------------------------------------------------------- */
+async function readLecture(page, fallbackDate) {
+  await page.locator(SELECTORS.detail.ready).first().waitFor({ timeout: TIMING.waitTimeout });
+  await page.waitForTimeout(TIMING.detailSettle);
+
+  const 수업명 = await text(page, SELECTORS.detail.수업명);
+  const 강사 = await text(page, SELECTORS.detail.강사);
+  const { 예약일자, 수업시간 } = parseLectureDateTime(await text(page, SELECTORS.detail.일시));
+
+  const rows = page.locator(SELECTORS.bookings.list);
+  const n = await rows.count();
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const row = rows.nth(i);
+    const { 이름, 연락처 } = parseMemberLine(await text(row, SELECTORS.booking.회원));
+    if (!이름) continue;
+    const ticket = parseTicketLine(await text(row, SELECTORS.booking.수강권));
+    out.push({
+      예약일자: 예약일자 || fallbackDate,
+      수업시간,
+      수업명,
+      강사,
+      이름,
+      연락처,
+      예약상태: await text(row, SELECTORS.booking.예약상태),
+      ...ticket,
+    });
+  }
+  return out;
+}
+
+/* ----------------------------------------------------------------------
+   한 사이트의 하루치 예약자 수집
+   site: { slug, defaultBranch }  ← everybarre 는 청담·판교 두 지점이 섞여 있어
+         지점은 수강권명에서 뽑고(branchOf), 태그가 없을 때만 defaultBranch 로 폴백한다.
    반환: { rows, 수업수, missing }
-     · rows    reservations 레코드 배열 (정규화 완료)
-     · 수업수  그날 화면에 있던 수업 개수. **0건과 실패를 구분하기 위해 따로 준다** —
-               일요일 휴무처럼 수업이 0개인 건 정상이지만, 수업은 있는데 예약자가 0명이면
-               셀렉터를 의심해야 한다.
-     · missing 전 행이 비어 있던 필드(=셀렉터 미설정 의심)
+     · 수업수 0 은 정상일 수 있다(휴무일). 수업은 있는데 예약자가 0명이면 셀렉터를 의심.
    실패는 삼키지 않고 throw 한다.
    ---------------------------------------------------------------------- */
-export async function scrapeBranch(page, branch, { date, mode = 'roster' }) {
-  if (!branch.slug) {
-    throw new Error(`[${branch.name}] SM_SLUG_* 미설정 — 이 지점은 스크랩할 수 없습니다.`);
-  }
+export async function scrapeBranch(page, site, { date }) {
+  if (!site.slug) throw new Error(`[${site.label ?? site.slug}] slug 미설정`);
   if (!selectorsReady()) {
     throw new Error(
-      'automation/studiomate/selectors.mjs 의 셀렉터가 아직 비어 있습니다. ' +
-        '라이브 세션에서 채우거나, 그 전까지는 MOCK_FILE 로 파이프라인을 검증하세요.',
+      'automation/studiomate/selectors.mjs 의 셀렉터가 비어 있습니다. MOCK_FILE 로 먼저 검증하세요.',
     );
   }
 
-  await page.goto(URLS.schedule(branch.slug, date), {
+  await page.goto(URLS.schedule(site.slug), {
     waitUntil: 'domcontentloaded',
     timeout: TIMING.navTimeout,
   });
+  await gotoDate(page, date);
 
-  const classList = page.locator(SELECTORS.classes.list);
-  try {
-    await classList.first().waitFor({ state: 'visible', timeout: TIMING.waitTimeout });
-  } catch {
-    // 수업이 정말 0개인가(휴무일), 아니면 화면을 못 읽은 건가?
-    if (SELECTORS.classes.empty && (await page.locator(SELECTORS.classes.empty).count())) {
-      return { rows: [], 수업수: 0, missing: [] };
-    }
-    throw new Error(
-      `[${branch.name}] ${date} 수업 목록을 찾지 못했습니다. ` +
-        '(로그인 실패 / URLS.schedule / SELECTORS.classes.list 중 하나를 확인)',
-    );
-  }
-
-  const 수업수 = await classList.count();
+  const items = page.locator(SELECTORS.calendar.classItem);
+  const 수업수 = await items.count();
   const rows = [];
 
   for (let i = 0; i < 수업수; i++) {
-    const classRow = classList.nth(i);
-    const cls = await readFields(classRow, SELECTORS.class, page);
+    await items.nth(i).click({ timeout: TIMING.waitTimeout });
+    await page.waitForURL(/\/lecture\/detail/, { timeout: TIMING.waitTimeout });
 
-    if (SELECTORS.classOpen) {
-      await classRow.locator(SELECTORS.classOpen).first().click({ timeout: TIMING.waitTimeout });
-      await page.waitForTimeout(TIMING.modalSettle);
+    const raws = await readLecture(page, date);
+    for (const raw of raws) {
+      rows.push(toReservationRecord(raw, { branch: site.defaultBranch, date }));
     }
 
-    const scope = SELECTORS.bookings.root ? page.locator(SELECTORS.bookings.root) : classRow;
-    const bookingRows = scope.locator(SELECTORS.bookings.list);
-    const n = await bookingRows.count();
-
-    for (let j = 0; j < n; j++) {
-      const raw = { ...cls, 예약일자: date };
-      mergeNonEmpty(raw, await readFields(bookingRows.nth(j), SELECTORS.booking, page));
-
-      // 출석 모드에서만 회원 상세(수강권 모달)까지 열어 전체/잔여/기간을 읽는다
-      if (mode === 'attendance' && SELECTORS.detail.open) {
-        mergeNonEmpty(raw, await readDetail(page, bookingRows.nth(j)));
-      }
-
-      if (!normText(raw.이름)) continue; // 이름 없는 행(헤더·구분선 등)은 버린다
-      rows.push(toReservationRecord(raw, { branch: branch.name, date }));
-    }
-
-    if (SELECTORS.classOpen || SELECTORS.bookings.root) {
-      await closeOverlay(page, SELECTORS.bookingsClose);
-    }
+    await page.goBack({ waitUntil: 'domcontentloaded', timeout: TIMING.navTimeout });
+    await page.locator(SELECTORS.calendar.classItem).first().waitFor({ timeout: TIMING.waitTimeout });
+    /* ⚠️ 이 SPA 는 ?date= 를 무시하므로, 뒤로 가면 캘린더가 오늘로 되돌아갈 수 있다.
+       매번 확인해서 어긋나면 다시 이동한다(대개 한두 칸이라 싸다). */
+    if ((await currentDate(page)) !== date) await gotoDate(page, date);
   }
 
-  const wanted = WANTED[mode] || WANTED.roster;
-  const missing = rows.length ? wanted.filter((f) => rows.every((r) => !r[f])) : [];
-
+  const missing = rows.length ? WANTED.filter((f) => rows.every((r) => !r[f])) : [];
   return { rows, 수업수, missing };
-}
-
-/** 예약자 행 → 회원 상세/수강권 모달에서 전체·잔여·기간 읽기 */
-async function readDetail(page, bookingRow) {
-  const opener = bookingRow.locator(SELECTORS.detail.open).first();
-  if ((await opener.count()) === 0) return {};
-
-  await opener.click({ timeout: TIMING.waitTimeout });
-  await page.waitForTimeout(TIMING.modalSettle);
-
-  const scope = SELECTORS.detail.root ? page.locator(SELECTORS.detail.root) : page;
-  // open/root/close 는 값이 아니라 조작용이므로 필드맵에서 제외한다
-  const { open: _o, root: _r, close: _c, ...fields } = SELECTORS.detail;
-  const out = await readFields(scope, fields, page);
-
-  await closeOverlay(page, SELECTORS.detail.close);
-  return out;
 }

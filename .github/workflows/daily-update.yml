@@ -18,11 +18,10 @@
 #    21:00 은 마지막 수업이 끝난 뒤라 지연에 관대하지만, 정확한 시각이 필요해지면 외부
 #    스케줄러(cron-job.org → workflow_dispatch API)를 붙여야 한다.
 #
-# 필요한 Secrets (20개):
-#   SUPABASE_URL, SUPABASE_ANON_KEY          공개값이지만 Secrets 로 주입
+# 필요한 Secrets — 필수 12개 + 선택 2개:
+#   (선택) SUPABASE_URL, SUPABASE_ANON_KEY   공개값. 생략 가능(config.mjs 에 기본값 있음)
 #   ADMIN_EMAIL, ADMIN_PASSWORD              관리자 계정 — 비밀
-#   STUDIOMATE_EMAIL, STUDIOMATE_PASSWORD
-#   SM_SLUG_{CHEONGDAM,OKSU,GWANGGYO,BANPO,PANGYO,SONGPA}
+#   STUDIOMATE_PHONE, STUDIOMATE_PASSWORD    ⚠️ 이메일 아님. 휴대폰 번호로 로그인한다
 #   SLACK_BOT_TOKEN                          xoxb-… (스코프: chat:write, chat:write.public)
 #   SLACK_CHANNEL_{CHEONGDAM,OKSU,GWANGGYO,BANPO,PANGYO,SONGPA}
 #   SLACK_CHANNEL_OPS                        실패 알림 채널
@@ -67,15 +66,11 @@ jobs:
       SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
       ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
       ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
-      STUDIOMATE_EMAIL: ${{ secrets.STUDIOMATE_EMAIL }}
+      # ⚠️ 스튜디오메이트는 이메일이 아니라 **휴대폰 번호**로 로그인한다.
+      STUDIOMATE_PHONE: ${{ secrets.STUDIOMATE_PHONE }}
       STUDIOMATE_PASSWORD: ${{ secrets.STUDIOMATE_PASSWORD }}
-
-      SM_SLUG_CHEONGDAM: ${{ secrets.SM_SLUG_CHEONGDAM }}
-      SM_SLUG_OKSU: ${{ secrets.SM_SLUG_OKSU }}
-      SM_SLUG_GWANGGYO: ${{ secrets.SM_SLUG_GWANGGYO }}
-      SM_SLUG_BANPO: ${{ secrets.SM_SLUG_BANPO }}
-      SM_SLUG_PANGYO: ${{ secrets.SM_SLUG_PANGYO }}
-      SM_SLUG_SONGPA: ${{ secrets.SM_SLUG_SONGPA }}
+      # SM_SLUG_* 는 이제 Secret 이 아니다 — 공개 서브도메인이라 config.mjs 에 기본값이 있다.
+      # 다른 스튜디오로 옮길 때만 SM_SLUG_MAIN / _GWANGGYO / _OKSU / _BANPO / _SONGPA 로 덮어쓴다.
 
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
       SLACK_CHANNEL_CHEONGDAM: ${{ secrets.SLACK_CHANNEL_CHEONGDAM }}

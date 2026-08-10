@@ -1,104 +1,100 @@
 // ============================================================================
-// 스튜디오메이트 — URL + 셀렉터 (⚠️ 라이브 세션에서 고치는 파일은 여기 **하나뿐**이다)
+// 스튜디오메이트 — URL + 셀렉터 (⚠️ 화면이 바뀌면 고치는 파일은 여기 **하나뿐**이다)
 // ----------------------------------------------------------------------------
-// scrape.mjs 는 이 파일의 값을 데이터로만 다룬다(필드맵 순회). 그래서 화면 구조가 바뀌면
-// 여기만 고치면 되고, 흐름 코드는 손댈 필요가 없다.
+// 2026-08-10 실제 화면(everybarre.studiomate.kr)에서 확인해 채웠다.
+// scrape.mjs 는 흐름만 담당하고 이 파일의 값만 본다.
 //
-// 셀렉터 값은 두 가지를 허용한다:
-//   1) 문자열  — CSS/Playwright 셀렉터. 첫 매치의 textContent 를 읽는다.
-//   2) 함수    — async (scope, page) => string.  속성 읽기·정규식 등 예외 케이스용.
-//                예: (row) => row.getAttribute('data-phone')
-//   3) null    — "아직 모름". 그 필드는 빈 값이 되고 실행 요약에 '미수집 필드'로 경고가 뜬다.
-//                → 셀렉터를 한 번에 다 채우지 않아도 파이프라인을 돌려볼 수 있다.
+// 화면 구조 (라이브 확인 결과)
+//   /schedule                     일간(룸별) 캘린더. FullCalendar 기반.
+//                                 · 날짜는 URL 쿼리(?date=)로 못 바꾼다 — **무시된다.**
+//                                   좌/우 화살표 버튼으로만 이동한다.
+//                                 · 수업 블록 = .event-item  (예약/정원, 시각, 수업명)
+//   → 수업 블록 클릭
+//   /lecture/detail?id=<n>        수업 상세. **여기 한 페이지에 필요한 게 전부 있다.**
+//                                 회원 상세 모달에 따로 들어갈 필요가 없다:
+//                                   이름 · 연락처 · 수강권명 · 잔여횟수 · 수강권기간 · 예약상태
 //
-// 채우는 법:
-//   HEADLESS=false 로 두면 브라우저 창이 뜬다. 또는
-//   npx playwright codegen https://<slug>.studiomate.kr
-//
-// 확인 순서: roster(D+1 명단, 단순) → attendance(D-1 출석 + 수강권 모달, 복잡)
+// ⚠️ 전체횟수는 화면 어디에도 없다("12회 남음"만 있다). 그래서 스크래퍼는 전체횟수를
+//    비워 보내고, apply_attendance v2 가 coalesce 로 DB 기존 값을 유지한다.
+//    (전체횟수는 등록 시점 확정값이고 주간 엑셀 재업로드로 교정된다)
 // ============================================================================
 
-/* ----------------------------------------------------------------------
-   URL — 실제 도메인 형태를 라이브 세션에서 확인할 것.
-   지점마다 서브도메인이 다를 가능성이 높아 slug 를 받는 형태로 뒀다.
-   ---------------------------------------------------------------------- */
 export const URLS = {
-  /** 로그인 페이지. slug 별로 다르면 (slug) => ... 로 바꿀 것. */
-  login: (slug) => (slug ? `https://${slug}.studiomate.kr/login` : 'https://studiomate.kr/login'),
-  /** 특정 날짜(YYYY-MM-DD)의 수업 목록. */
-  schedule: (slug, date) => `https://${slug}.studiomate.kr/schedule?date=${date}`,
+  /** 로그인 — ⚠️ 이메일이 아니라 **휴대폰 번호**로 로그인한다. */
+  login: (slug) => `https://${slug}.studiomate.kr/login`,
+  /** 일정(일간). 날짜는 쿼리로 못 넘긴다 — 화살표로 이동해야 한다. */
+  schedule: (slug) => `https://${slug}.studiomate.kr/schedule`,
 };
 
 export const SELECTORS = {
   // ── 로그인 ────────────────────────────────────────────────────────────
   login: {
-    email: 'input[type="email"]',
-    password: 'input[type="password"]',
+    phone: 'input#mobileRequired',
+    password: 'input#password',
     submit: 'button[type="submit"]',
-    /** 로그인 성공을 확인할 요소. null 이면 networkidle 만 기다린다. */
-    success: null,
+    /** 로그인 성공 판정 — 상단 메뉴가 뜨면 성공 */
+    success: '.main-nav',
   },
 
-  // ── 수업 목록 ─────────────────────────────────────────────────────────
-  classes: {
-    /** 수업 한 개를 나타내는 행/카드. TODO */
-    list: null,
-    /** "수업 없음" 안내 요소. 있으면 0건을 '정상'으로 판정한다(휴무일 구분). */
-    empty: null,
+  // ── 일정(캘린더) ──────────────────────────────────────────────────────
+  calendar: {
+    /** 현재 보고 있는 날짜(YYYY-MM-DD)를 담은 input. 목표 날짜 도달 검증에 쓴다. */
+    dateInput: '.el-date-editor input.el-input__inner',
+    prevDay: '.calendar-controls__buttons button:has(.el-icon-arrow-left)',
+    nextDay: '.calendar-controls__buttons button:has(.el-icon-arrow-right)',
+    /** 일간(룸별) 뷰로 고정 — 다른 뷰면 .event-item 배치가 달라진다. */
+    dayRoomViewLabel: 'label:has(input.el-radio-button__orig-radio[value="date|room"])',
+    dayRoomViewRadio: 'input.el-radio-button__orig-radio[value="date|room"]',
+    /** 수업 블록. 클릭하면 /lecture/detail 로 이동한다. */
+    classItem: '.event-item',
   },
-  /** 수업 행 안에서 읽는 필드 */
-  class: {
-    수업시간: null,
-    수업명: null,
-    강사: null,
-  },
-  /** 예약자 목록을 펼치기 위해 수업 행에서 클릭할 요소. null 이면 클릭 없이 바로 읽는다. */
-  classOpen: null,
 
-  // ── 예약자 목록 ───────────────────────────────────────────────────────
-  bookings: {
-    /** 예약자 목록이 모달/사이드패널로 뜨면 그 루트. null 이면 수업 행 안에서 찾는다. */
-    root: null,
-    /** 예약자 한 명을 나타내는 행. TODO */
-    list: null,
-  },
-  /** 예약자 행 안에서 읽는 필드 */
-  booking: {
-    이름: null,
-    연락처: null,   // 목록에 안 보이면 null 로 두고 detail 에서 읽는다
-    수강권명: null,
-    예약상태: null,
-  },
-  /** 예약자 목록을 닫는 요소(모달인 경우). null 이면 Escape 키를 누른다. */
-  bookingsClose: null,
-
-  // ── 회원 상세 / 수강권 모달 (mode:'attendance' 에서만 탄다) ─────────────
+  // ── 수업 상세 ─────────────────────────────────────────────────────────
   detail: {
-    /** 예약자 행에서 상세를 여는 요소. null 이면 상세 진입 자체를 하지 않는다. */
-    open: null,
-    /** 모달 루트. null 이면 page 전체에서 찾는다. */
-    root: null,
-    전체횟수: null,
-    잔여횟수: null,
-    수강권시작일: null,
-    수강권종료일: null,
-    연락처: null,
-    /** 닫기 버튼. null 이면 Escape. */
-    close: null,
+    /** 이 요소가 보이면 상세 페이지 로딩 완료 */
+    ready: '.lecture-detail-header__content__title',
+    수업명: '.lecture-detail-header__content__title h3',
+    /** "2026년 8월 11일 화요일 · 09:30 ~ 10:20" — normalize 가 날짜/시각으로 쪼갠다 */
+    일시: '.lecture-detail-header__content__title p',
+    강사: '.lecture-info__block__instructor a',
+  },
+
+  // ── 예약자 목록 (수업 상세 안) ─────────────────────────────────────────
+  bookings: {
+    /* ⚠️ li 만으로 잡으면 안 된다 — 예약상태 드롭다운의 옵션(취소/출석/결석/노쇼)도
+          li 라서 11명짜리 수업에서 55개가 잡힌다. 반드시 .members-list-item 을 쓴다. */
+    list: 'li.members-list-item',
+  },
+  booking: {
+    /** "박진화 · 010-3850-9069" — normalize 가 이름/연락처로 쪼갠다 */
+    회원: '.members-list-item__name a',
+    /** "바레 그룹 40회(판교) · 12회 남음 · 2026. 5. 8.~2026. 11. 3." */
+    수강권: '.members-list-item__ticket-info',
+    /* 예약상태는 텍스트가 아니라 **readonly input 의 value** 다.
+       (Element UI 셀렉트라 선택값이 textContent 에 안 나온다) */
+    예약상태: async (row) => {
+      const el = row.locator('.members-list-item__select input').first();
+      if (!(await el.count())) return '';
+      return (await el.inputValue()) || '';
+    },
   },
 };
 
-/* ----------------------------------------------------------------------
-   타이밍 — 화면이 느리면 여기만 늘린다.
-   ---------------------------------------------------------------------- */
+/** 예약상태 어휘 — 실제 드롭다운 옵션에서 확인 (미래 수업은 '예약') */
+export const STATUS_VALUES = ['예약', '출석', '결석', '노쇼', '취소'];
+
 export const TIMING = {
   navTimeout: 30000,
   waitTimeout: 15000,
-  /** 모달이 열리고 내용이 그려질 때까지의 여유 (ms) */
-  modalSettle: 300,
+  /** 캘린더가 날짜를 다시 그릴 때까지의 여유 */
+  daySettle: 700,
+  /** 상세 페이지 렌더 여유 */
+  detailSettle: 400,
 };
 
-/** 셀렉터가 아직 하나도 안 채워졌는지 — run.mjs 가 친절한 에러를 내기 위해 쓴다. */
+/** 셀렉터가 채워졌는지 — run.mjs 가 친절한 에러를 내기 위해 쓴다. */
 export function selectorsReady() {
-  return Boolean(SELECTORS.classes.list && SELECTORS.bookings.list && SELECTORS.booking.이름);
+  return Boolean(
+    SELECTORS.calendar.classItem && SELECTORS.bookings.list && SELECTORS.booking.회원,
+  );
 }

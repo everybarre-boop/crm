@@ -88,8 +88,9 @@ as $$
       (t.e ->> '이름')                                             as nm,
       regexp_replace(coalesce(t.e ->> '연락처', ''), '[^0-9]', '', 'g') as phone,
       (t.e ->> '수강권명')                                          as ticket,
-      (t.e ->> '전체횟수')                                          as tot,
-      (t.e ->> '잔여횟수')                                          as rem,
+      -- 빈 문자열은 null 로. "값이 없다"와 "0" 을 구분해야 아래 coalesce 가 동작한다.
+      nullif(t.e ->> '전체횟수', '')                                 as tot,
+      nullif(t.e ->> '잔여횟수', '')                                 as rem,
       public.ymd_num(t.e ->> '수강권시작일')                         as startd
     from jsonb_array_elements(coalesce(records, '[]'::jsonb)) with ordinality as t(e, ord)
   ),
@@ -174,9 +175,15 @@ begin
       order by m.mid, m.ord
     )
     update public.members mem
-       -- 전체/잔여횟수만 갱신한다. 둘 다 KEY_COLS 에 없으므로 dedup_key 는 그대로 둔다.
-       set "전체횟수" = tgt.tot,
-           "잔여횟수" = tgt.rem
+       /* 전체/잔여횟수만 갱신한다. 둘 다 KEY_COLS 에 없으므로 dedup_key 는 그대로 둔다.
+          ⚠️ coalesce 가 핵심이다 — 스튜디오메이트 예약자 목록에는 **전체횟수가 없다**
+             ("12회 남음"만 있고 "40회 중 12회"가 아니다). 그래서 스크래퍼는 전체횟수를
+             비워 보내고, 여기서는 기존 DB 값을 그대로 둔다.
+             전체횟수는 등록 시점에 확정되고 이후 안 변하며 주간 엑셀 재업로드로 교정되므로,
+             매일 갱신할 필요가 없다. 잔여횟수만 맞으면 used_count(=전체−잔여)가 저절로 맞다.
+             coalesce 없이 덮어쓰면 전체횟수가 통째로 비워져 used_count 가 음수가 된다. */
+       set "전체횟수" = coalesce(tgt.tot, mem."전체횟수"),
+           "잔여횟수" = coalesce(tgt.rem, mem."잔여횟수")
       from tgt
      where mem.id = tgt.mid;
 
