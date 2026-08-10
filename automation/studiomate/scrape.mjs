@@ -40,48 +40,137 @@ async function text(scope, sel) {
       "예약자 0명"으로 오해하면 아무 일도 안 일어난 채 초록불만 남는다.
    ---------------------------------------------------------------------- */
 export async function loginStudioMate(page, { phone, password, slug }) {
+  await installOverlayGuard(page);
   await page.goto(URLS.login(slug), {
     waitUntil: 'domcontentloaded',
     timeout: TIMING.navTimeout,
   });
-  await page.fill(SELECTORS.login.phone, phone, { timeout: TIMING.waitTimeout });
-  await page.fill(SELECTORS.login.password, password, { timeout: TIMING.waitTimeout });
-  await page.click(SELECTORS.login.submit, { timeout: TIMING.waitTimeout });
+  // 셀렉터가 콤마로 묶여 있어 여러 개가 매칭될 수 있다 → strict 모드를 피하려 .first() 를 쓴다
+  await page.locator(SELECTORS.login.phone).first().fill(phone, { timeout: TIMING.waitTimeout });
+  await page
+    .locator(SELECTORS.login.password)
+    .first()
+    .fill(password, { timeout: TIMING.waitTimeout });
+  await page.locator(SELECTORS.login.submit).first().click({ timeout: TIMING.waitTimeout });
 
-  if (SELECTORS.login.success) {
-    await page
-      .locator(SELECTORS.login.success)
-      .first()
-      .waitFor({ timeout: TIMING.waitTimeout })
-      .catch(() => {});
-  }
-  await page.waitForLoadState('networkidle', { timeout: TIMING.waitTimeout }).catch(() => {});
+  /* 로그인 성공하면 앱이 스스로 /schedule 로 옮겨 간다. 그 전에 다른 곳으로 goto 하면
+     리다이렉트가 끊겨 로그인이 안 붙는다 → URL 이 /login 을 벗어날 때까지 기다린다. */
+  await page
+    .waitForURL((u) => !/\/login/.test(String(u)), { timeout: TIMING.waitTimeout })
+    .catch(() => {});
+  /* 성공 표식(상단 메뉴)이 뜨는지로 판정한다.
+     "비밀번호 칸이 사라졌는가" 같은 소극적 판정은 오탐이 난다(숨은 input 등). */
+  const ok = await page
+    .locator(SELECTORS.login.success)
+    .first()
+    .waitFor({ timeout: TIMING.waitTimeout })
+    .then(() => true)
+    .catch(() => false);
 
-  if (await page.locator(SELECTORS.login.password).count()) {
+  if (!ok) {
+    // 화면에 뜬 안내 문구를 그대로 물고 온다 — "비밀번호 불일치"인지 "잠김"인지 구분해야 한다
+    const msg = await page
+      .evaluate(() => {
+        const t = [...document.querySelectorAll('p, span, div')]
+          .map((e) => (e.textContent || '').trim())
+          .find((s) => s && s.length < 100 && /(일치하지|실패|잠긴|차단|초과|오류)/.test(s));
+        return t || '';
+      })
+      .catch(() => '');
     throw new Error(
-      `[${slug}] 스튜디오메이트 로그인 실패 — 휴대폰 번호/비밀번호 또는 login 셀렉터를 확인하세요.`,
+      `[${slug}] 스튜디오메이트 로그인 실패 (URL: ${page.url()})` +
+        (msg ? ` — 화면 안내: "${msg}"` : ' — 휴대폰 번호/비밀번호 또는 login 셀렉터를 확인하세요.'),
     );
   }
+  await page.waitForLoadState('networkidle', { timeout: TIMING.waitTimeout }).catch(() => {});
 }
 
 /* ----------------------------------------------------------------------
    날짜 이동 — 화살표를 한 칸씩 누르며 매번 검증한다.
    ---------------------------------------------------------------------- */
+/* ⚠️ 요소가 있다고 값이 있는 건 아니다. SPA 가 날짜를 채우기 전에 읽으면 빈 문자열이 온다
+   (첫 진입에서 실제로 겪었다). 값이 생길 때까지 짧게 폴링한다. */
 async function currentDate(page) {
   const loc = page.locator(SELECTORS.calendar.dateInput).first();
   await loc.waitFor({ timeout: TIMING.waitTimeout });
-  return normDate(await loc.inputValue());
+  const deadline = Date.now() + TIMING.waitTimeout;
+  for (;;) {
+    const v = normDate(await loc.inputValue().catch(() => ''));
+    if (v) return v;
+    if (Date.now() > deadline) return '';
+    await page.waitForTimeout(200);
+  }
+}
+
+/* 공지/배너 다이얼로그 무력화.
+   ⚠️ 이 오버레이는 **페이지를 옮길 때마다 다시 뜬다.** 닫기 버튼을 누르는 것만으로는
+      부족해서(실측: 뒤로 간 뒤 다시 떠서 화살표 클릭이 30초간 막혔다) CSS 로 아예 없앤다.
+      addInitScript 는 이후 모든 네비게이션에 자동 적용되므로 한 번만 걸면 된다.
+      우리는 어떤 다이얼로그도 쓰지 않으므로 전부 숨겨도 안전하다. */
+const _guarded = new WeakSet();
+async function installOverlayGuard(page) {
+  if (_guarded.has(page)) return;
+  _guarded.add(page);
+  await page.addInitScript(() => {
+    const css = '.el-dialog__wrapper,.v-modal,.el-loading-mask{display:none !important;}';
+    const add = () => {
+      const s = document.createElement('style');
+      s.textContent = css;
+      (document.head || document.documentElement).appendChild(s);
+    };
+    if (document.head) add();
+    else document.addEventListener('DOMContentLoaded', add, { once: true });
+  });
+}
+
+/** 이미 떠 있는 다이얼로그를 닫는다(가드를 걸기 전에 뜬 것 대비). */
+async function dismissDialogs(page) {
+  for (let i = 0; i < 5; i++) {
+    const dlg = page.locator(SELECTORS.dialogs.any).first();
+    if (!(await dlg.count())) return;
+    const btn = dlg.locator(SELECTORS.dialogs.close).first();
+    if (await btn.count()) await btn.click({ timeout: 3000 }).catch(() => {});
+    else await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(400);
+  }
+}
+
+/* 일간 뷰로 고정한다.
+   ⚠️ 지점마다 선택지가 다르다 — 룸이 여러 개인 곳만 '일간(룸별)'이 있고, 광교처럼 룸이
+      하나면 '일간(강사별)'뿐이다. 그리고 새 세션의 기본 뷰는 **주간**이라
+      (뷰 설정이 localStorage 에만 저장된다) 그대로 두면 날짜 값이 '2026w33' 처럼 나온다. */
+async function ensureDayView(page) {
+  for (const v of SELECTORS.calendar.dayViewValues) {
+    const radio = page.locator(SELECTORS.calendar.dayViewRadio(v)).first();
+    if (!(await radio.count())) continue;
+    if (!(await radio.isChecked())) {
+      await page.locator(SELECTORS.calendar.dayViewLabel(v)).first().click();
+      await page.waitForTimeout(TIMING.daySettle);
+    }
+    return v;
+  }
+  throw new Error(
+    '일간 뷰를 찾지 못했습니다(월간/주간만 있음). selectors.mjs 의 dayViewValues 를 확인하세요.',
+  );
 }
 
 async function gotoDate(page, target) {
-  // 일간(룸별) 뷰가 아니면 .event-item 배치가 달라진다 → 먼저 고정
-  const radio = page.locator(SELECTORS.calendar.dayRoomViewRadio).first();
-  if ((await radio.count()) && !(await radio.isChecked())) {
-    await page.locator(SELECTORS.calendar.dayRoomViewLabel).first().click();
-    await page.waitForTimeout(TIMING.daySettle);
-  }
+  // 캘린더 컨트롤이 그려질 때까지 기다린다(로그인 직후엔 아직 없다)
+  await page
+    .locator(SELECTORS.calendar.prevDay)
+    .first()
+    .waitFor({ timeout: TIMING.waitTimeout });
+
+  await dismissDialogs(page); // 공지 팝업이 클릭을 가로채기 전에 치운다
+  await ensureDayView(page);
 
   let cur = await currentDate(page);
+  if (!cur) {
+    throw new Error(
+      '캘린더의 현재 날짜를 읽지 못했습니다 — 로그인이 풀렸거나 화면이 안 그려졌습니다 ' +
+        `(URL: ${page.url()})`,
+    );
+  }
   for (let guard = 0; cur !== target && guard < 60; guard++) {
     const diff = daysBetween(cur, target);
     if (diff === null) throw new Error(`날짜를 읽지 못했습니다 (현재="${cur}", 목표="${target}")`);

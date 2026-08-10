@@ -29,22 +29,44 @@ export const URLS = {
 export const SELECTORS = {
   // ── 로그인 ────────────────────────────────────────────────────────────
   login: {
-    phone: 'input#mobileRequired',
-    password: 'input#password',
-    submit: 'button[type="submit"]',
+    /* ⚠️ 로그인 폼이 두 종류다(실측):
+         지점 서브도메인(everybarre-*.studiomate.kr) → input#identity      placeholder "휴대폰 번호"
+         공통 관리자앱(manager.studiomate.kr)        → input#mobileRequired placeholder "휴대폰 번호 입력"
+       셋을 콤마로 묶어 둔다(같은 요소가 여러 번 매칭돼도 Playwright 가 하나로 본다). */
+    phone: 'input#identity, input#mobileRequired, input[placeholder^="휴대폰 번호"]',
+    password: 'input#password, input[type="password"]',
+    submit: 'button[type="submit"], button:has-text("로그인")',
     /** 로그인 성공 판정 — 상단 메뉴가 뜨면 성공 */
     success: '.main-nav',
   },
 
+  /* ── 방해 요소 ─────────────────────────────────────────────────────────
+     로그인 직후 공지/배너 다이얼로그(.noti-dialog)가 떠서 **클릭을 가로챈다**.
+     실측에서 뷰 전환 클릭이 30초간 막혔다 → 조작 전에 먼저 닫는다. */
+  dialogs: {
+    any: '.el-dialog__wrapper:visible',
+    close:
+      '.el-dialog__headerbtn, button:has-text("닫기"), button:has-text("오늘 하루"), button:has-text("확인")',
+  },
+
   // ── 일정(캘린더) ──────────────────────────────────────────────────────
   calendar: {
-    /** 현재 보고 있는 날짜(YYYY-MM-DD)를 담은 input. 목표 날짜 도달 검증에 쓴다. */
-    dateInput: '.el-date-editor input.el-input__inner',
+    /** 현재 보고 있는 날짜를 담은 input.
+        ⚠️ 뷰에 따라 값 형식이 다르다 — 일간이면 '2026-08-10', 주간이면 '2026w33'.
+           그래서 반드시 **일간 뷰로 바꾼 뒤** 읽어야 한다. */
+    dateInput: '.el-date-editor input',
     prevDay: '.calendar-controls__buttons button:has(.el-icon-arrow-left)',
     nextDay: '.calendar-controls__buttons button:has(.el-icon-arrow-right)',
-    /** 일간(룸별) 뷰로 고정 — 다른 뷰면 .event-item 배치가 달라진다. */
-    dayRoomViewLabel: 'label:has(input.el-radio-button__orig-radio[value="date|room"])',
-    dayRoomViewRadio: 'input.el-radio-button__orig-radio[value="date|room"]',
+
+    /* 일간 뷰 라디오 — 앞에 있는 것부터 시도한다.
+       ⚠️ 지점마다 선택지가 다르다: 룸이 여러 개인 곳(청담·판교)에만 '일간(룸별)'이 있고,
+          룸이 하나인 곳(광교 등)은 '일간(강사별)'만 있다. 실측으로 확인했다.
+       ⚠️ 새 세션의 기본 뷰는 **주간**이다(뷰 설정은 localStorage 에 저장되는데
+          자동화는 매번 새 세션이다). 그래서 매번 일간으로 바꿔야 한다. */
+    dayViewValues: ['date|room', 'date|instructor'],
+    dayViewRadio: (v) => `input.el-radio-button__orig-radio[value="${v}"]`,
+    dayViewLabel: (v) => `label:has(input.el-radio-button__orig-radio[value="${v}"])`,
+
     /** 수업 블록. 클릭하면 /lecture/detail 로 이동한다. */
     classItem: '.event-item',
   },
