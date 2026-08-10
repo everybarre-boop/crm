@@ -6,7 +6,7 @@
 // ============================================================================
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCrm } from '../../shared/crm-rules.mjs';
+import { DEFAULT_RULES, buildCrm } from '../../shared/crm-rules.mjs';
 import { makePersonResolver, usedCount, dateKST, daysBetween } from '../../shared/crm-core.mjs';
 
 const TODAY = '2026-08-05';
@@ -76,14 +76,28 @@ test('마일스톤: 예정회차 99 는 발동하지 않는다 (소급 한도 �
   assert.equal(one(r, 'milestone'), undefined);
 });
 
-test('마일스톤: 스크랩 누락으로 100 을 지나쳤으면 소급 보정(한도 10 이내)', () => {
-  // 사용 104 → 예정 105. 100 을 이미 지났지만 5 차이라 소급 발송.
+/* 소급은 기본 꺼져 있다 — 켜면 "오늘로 100번째 수업이에요"가 누적 105회 회원에게 나가
+   **사실과 다른 문장**이 된다(2026-08-10 실측에서 4건 중 3건이 이 상태였다). */
+test('마일스톤: 이미 지난 마일스톤은 소급하지 않는다 (기본)', () => {
+  // 사용 104 → 예정 105. 100 을 지났지만 소급허용=false 라 발동하지 않는다.
   const r = run({
     memberRows: [mem({ 전체횟수: '120', 잔여횟수: '16' })],
     rosterRows: [resv()],
   });
+  assert.equal(one(r, 'milestone'), undefined);
+});
+
+test('마일스톤: 소급허용을 켜면 한도 안에서 소급된다', () => {
+  const rules = DEFAULT_RULES.map((x) =>
+    x.id === 'milestone' ? { ...x, 파라미터: { ...x.파라미터, 소급허용: true } } : x,
+  );
+  const r = run({
+    memberRows: [mem({ 전체횟수: '120', 잔여횟수: '16' })],
+    rosterRows: [resv()],
+    rules,
+  });
   const m = one(r, 'milestone');
-  assert.ok(m, '소급 보정이 안 걸렸다');
+  assert.ok(m, '소급허용=true 인데 안 걸렸다');
   assert.equal(m.규칙키, '100');
   assert.equal(m.근거.소급, true);
 });
@@ -189,6 +203,51 @@ test('"체험 후 1회권" 은 체험이 아니라 신규 등록 첫 수업이�
 test('순수 "체험권" 은 여전히 체험으로 잡힌다', () => {
   const r = run({ memberRows: [], rosterRows: [resv({ 수강권명: '체험권 (판교)' })] });
   assert.ok(one(r, 'trial'));
+});
+
+/* 실측: 누적 51회 회원이 새 수강권을 끊자 '신규 등록 첫 수업'으로 잡혔다.
+   "이 수강권 첫 사용"만 보면 재등록한 기존 회원이 전부 신규가 된다. */
+test('신규: 오래 다닌 회원의 재등록은 신규가 아니다 (최대누적 3회)', () => {
+  const r = run({
+    memberRows: [
+      mem({ 수강권명: '체험권 (광교)', 전체횟수: '1', 잔여횟수: '0', dedup_key: 't' }),
+      mem({ 수강권명: '바레 그룹 40회 (광교)', 전체횟수: '60', 잔여횟수: '10', dedup_key: 'old' }), // 50회 사용
+      mem({ 수강권명: '바레 그룹 10회 (광교)', 전체횟수: '10', 잔여횟수: '10', dedup_key: 'new' }), // 미사용
+    ],
+    rosterRows: [resv({ 수강권명: '바레 그룹 10회 (광교)' })],
+  });
+  assert.equal(one(r, 'first-paid'), undefined);
+});
+
+/* ==========================================================================
+   ⑧ 1인 1건 — 같은 사람에게 여러 규칙이 걸리면 가장 나중 단계 하나만
+   ========================================================================== */
+test('1인 1건: 마일스톤과 체험이 겹치면 마일스톤만 남는다', () => {
+  const r = run({
+    // 누적 9 (과거 유료권) + 내일 체험권 수업 → 10회차 마일스톤 & 체험 둘 다 후보
+    memberRows: [
+      mem({ 수강권명: '바레 그룹 40회 (광교)', 전체횟수: '40', 잔여횟수: '31', dedup_key: 'a' }),
+      mem({ 수강권명: '체험권 (광교)', 전체횟수: '1', 잔여횟수: '1', dedup_key: 'b' }),
+    ],
+    rosterRows: [resv({ 수강권명: '체험권 (광교)' })],
+  });
+  assert.equal(r.messages.length, 1, '한 사람에게 두 건이 나갔다');
+  assert.equal(r.messages[0].rule_id, 'milestone');
+  assert.ok(r.warnings.some((w) => w.includes('1인 1건')));
+});
+
+test('1인 1건: 다른 사람끼리는 각자 받는다', () => {
+  const r = run({
+    memberRows: [
+      mem({ 이름: 'A', 연락처: '010-1111-1111', 전체횟수: '40', 잔여횟수: '31', dedup_key: 'a' }),
+      mem({ 이름: 'B', 연락처: '010-2222-2222', 수강권명: '체험권 (광교)', dedup_key: 'b' }),
+    ],
+    rosterRows: [
+      resv({ 이름: 'A', 연락처: '010-1111-1111' }),
+      resv({ 이름: 'B', 연락처: '010-2222-2222', 수강권명: '체험권 (광교)' }),
+    ],
+  });
+  assert.equal(r.messages.length, 2);
 });
 
 /* ==========================================================================

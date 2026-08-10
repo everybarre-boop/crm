@@ -39,12 +39,42 @@ async function text(scope, sel) {
    ⚠️ 로그인 후에도 비밀번호 입력칸이 남아 있으면 실패로 본다 — 로그인 실패를
       "예약자 0명"으로 오해하면 아무 일도 안 일어난 채 초록불만 남는다.
    ---------------------------------------------------------------------- */
-export async function loginStudioMate(page, { phone, password, slug }) {
+export async function loginStudioMate(page, { phone, password, slug, retries = 2 }) {
   await installOverlayGuard(page);
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      await attemptLogin(page, { phone, password, slug });
+      return;
+    } catch (err) {
+      lastErr = err;
+      // 자격증명이 실제로 틀렸으면(화면이 그렇게 말하면) 재시도해도 소용없다
+      if (/일치하지|잠긴|차단/.test(err.message)) throw err;
+      if (attempt < retries) await page.waitForTimeout(3000 * (attempt + 1));
+    }
+  }
+  throw lastErr;
+}
+
+async function attemptLogin(page, { phone, password, slug }) {
   await page.goto(URLS.login(slug), {
     waitUntil: 'domcontentloaded',
     timeout: TIMING.navTimeout,
   });
+
+  // 이미 로그인돼 있으면(앱이 곧장 /schedule 로 보낸다) 다시 하지 않는다
+  const already = await page
+    .locator(SELECTORS.login.success)
+    .first()
+    .waitFor({ timeout: 3000 })
+    .then(() => true)
+    .catch(() => false);
+  if (already) return;
+
+  await page
+    .locator(SELECTORS.login.phone)
+    .first()
+    .waitFor({ timeout: TIMING.waitTimeout });
   // 셀렉터가 콤마로 묶여 있어 여러 개가 매칭될 수 있다 → strict 모드를 피하려 .first() 를 쓴다
   await page.locator(SELECTORS.login.phone).first().fill(phone, { timeout: TIMING.waitTimeout });
   await page

@@ -107,7 +107,8 @@ export const STATUS_VALUES = ['예약', '출석', '결석', '노쇼', '취소'];
 
 export const TIMING = {
   navTimeout: 30000,
-  waitTimeout: 15000,
+  // 로그인 직후 앱이 초기 데이터를 여럿 부르느라 느릴 때가 있다(실측: 간헐적 15초 초과)
+  waitTimeout: 25000,
   /** 캘린더가 날짜를 다시 그릴 때까지의 여유 */
   daySettle: 700,
   /** 상세 페이지 렌더 여유 */
