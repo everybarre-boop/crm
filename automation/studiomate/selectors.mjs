@@ -24,6 +24,9 @@ export const URLS = {
   login: (slug) => `https://${slug}.studiomate.kr/login`,
   /** 일정(일간). 날짜는 쿼리로 못 넘긴다 — 화살표로 이동해야 한다. */
   schedule: (slug) => `https://${slug}.studiomate.kr/schedule`,
+  /* 수업 상세. **여기는 쿼리가 먹는다** — 날짜(?date=)와 달리 id 로 직접 열 수 있다(실측).
+     클릭 대신 이걸로 여는 이유는 scrape.mjs 2단계 주석 참고(클릭 직후엔 직전 수업이 보인다). */
+  lectureDetail: (slug, id) => `https://${slug}.studiomate.kr/lecture/detail?id=${encodeURIComponent(id)}`,
 };
 
 export const SELECTORS = {

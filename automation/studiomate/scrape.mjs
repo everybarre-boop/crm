@@ -155,6 +155,21 @@ async function installOverlayGuard(page) {
   });
 }
 
+/* 수업 상세 전용 탭.
+   캘린더 탭을 그대로 두려고 따로 연다 — 상세를 같은 탭에서 열면 캘린더가 오늘로 되돌아가
+   다음 날짜마다 화살표를 처음부터 눌러야 한다(백필이 O(n²) 가 된다).
+   같은 BrowserContext 라 쿠키·세션을 공유하므로 다시 로그인할 필요가 없다. */
+const _detailPages = new WeakMap();
+async function getDetailPage(page) {
+  const ctx = page.context();
+  const cached = _detailPages.get(ctx);
+  if (cached && !cached.isClosed()) return cached;
+  const p = await ctx.newPage();
+  await installOverlayGuard(p); // 공지 오버레이는 새 탭에도 뜬다
+  _detailPages.set(ctx, p);
+  return p;
+}
+
 /** 이미 떠 있는 다이얼로그를 닫는다(가드를 걸기 전에 뜬 것 대비). */
 async function dismissDialogs(page) {
   for (let i = 0; i < 5; i++) {
@@ -373,23 +388,26 @@ export async function scrapeBranch(page, site, { date, navigate = true }) {
   }
   const rows = [];
 
-  /* ⚠️ 수업 블록에는 안정적인 id/href 가 없어 nth(i) 로 도는데, **뒤로 가면 DOM 순서가
-     바뀔 수 있다.** 실측에서 같은 수업을 두 번 긁고 어떤 건 빠뜨려, 같은 날짜를 두 번
-     돌렸더니 예약자 수가 78 → 96 으로 달라졌다.
-     → 상세 URL 의 lecture id 로 중복을 제거하고, 못 본 수업이 남으면 한 번 더 훑는다. */
+  /* ── 1단계: 수업 id 만 모은다 (내용은 여기서 읽지 않는다) ────────────────
+     수업 블록에는 안정적인 id/href 가 없어(실측: data-id 도 href 도 없다) nth(i) 로 도는데,
+     **뒤로 가면 DOM 순서가 바뀐다.** 그래서 상세 URL 의 lecture id 로 중복을 제거하고,
+     못 본 수업이 남으면 한 번 더 훑는다. */
   const seen = new Set();
+  const ids = [];
   for (let pass = 0; pass < 2 && seen.size < 수업수; pass++) {
     const n = await items.count();
     for (let i = 0; i < n; i++) {
       await items.nth(i).click({ timeout: TIMING.waitTimeout });
       await page.waitForURL(/\/lecture\/detail/, { timeout: TIMING.waitTimeout });
 
-      const id = new URL(page.url()).searchParams.get('id') || `#${pass}-${i}`;
+      const id = new URL(page.url()).searchParams.get('id');
+      if (!id) {
+        // 폴백 키(#pass-i)를 쓰면 같은 수업이 다른 키로 두 번 담긴다 — 조용히 넘기지 않는다
+        throw new Error(`수업 상세 URL 에 id 가 없습니다 (${page.url()}). URL 구조가 바뀌었습니다.`);
+      }
       if (!seen.has(id)) {
         seen.add(id);
-        for (const raw of await readLecture(page, date)) {
-          rows.push(toReservationRecord(raw, { branch: site.defaultBranch, date }));
-        }
+        ids.push(id);
       }
 
       await page.goBack({ waitUntil: 'domcontentloaded', timeout: TIMING.navTimeout });
@@ -401,6 +419,39 @@ export async function scrapeBranch(page, site, { date, navigate = true }) {
       /* 이 SPA 는 ?date= 를 무시하므로 뒤로 가면 캘린더가 오늘로 되돌아갈 수 있다. */
       if ((await currentDate(page)) !== date) await gotoDate(page, date);
       if (seen.size >= 수업수) break;
+    }
+  }
+
+  /* ── 2단계: 상세를 URL 로 **직접 열어** 읽는다 ──────────────────────────
+     🔥 클릭 직후에 그 자리에서 읽으면 안 된다. 이 SPA 는 URL 을 먼저 바꾸고 내용은 API
+        응답 뒤에 다시 그리는데, 로딩 판정용 요소(.lecture-detail-header__content__title)는
+        **직전 수업 것이 그대로 남아 있어** waitFor 가 즉시 통과한다 → 이전 수업 명단을
+        새 id 로 한 번 더 읽는다.
+        실측(2026-07-29 청담·판교): 해월쌤12:00 명단이 솔쌤09:30 의 id 로 또 저장되고,
+        **솔쌤10:30 수업 10명은 통째로 사라졌다.** 고유 id 수는 8개로 맞아서 누락 검사도
+        통과했다 — 조용히 한 수업이 빠진 것이다.
+     goto 로 새로 로드하면 내용이 URL 과 반드시 일치한다(실측 확인).
+     캘린더는 **별도 탭**에 그대로 둔다 — 그래야 다음 날짜가 화살표 한 칸이다(백필 성능). */
+  const detail = await getDetailPage(page);
+  const 시그니처 = new Set();
+  for (const id of ids) {
+    await detail.goto(URLS.lectureDetail(site.slug, id), {
+      waitUntil: 'domcontentloaded',
+      timeout: TIMING.navTimeout,
+    });
+    const read = await readLecture(detail, date);
+    /* 같은 수업을 두 번 읽었다면 위 stale 문제가 되살아난 것이다. res_key 가 접어 주지만
+       그만큼 다른 수업을 못 읽었다는 뜻이라 조용히 넘기면 안 된다. */
+    const sig = `${read[0]?.수업명 ?? ''}|${read[0]?.수업시간 ?? ''}`;
+    if (read.length && 시그니처.has(sig)) {
+      throw new Error(
+        `같은 수업(${sig})을 두 번 읽었습니다 — 상세 화면이 URL 을 따라오지 못하고 있습니다. ` +
+          `그만큼 다른 수업이 통째로 빠집니다.`,
+      );
+    }
+    시그니처.add(sig);
+    for (const raw of read) {
+      rows.push(toReservationRecord(raw, { branch: site.defaultBranch, date }));
     }
   }
 
