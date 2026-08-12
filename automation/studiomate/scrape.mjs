@@ -264,15 +264,39 @@ async function readLecture(page, fallbackDate) {
     }
   }
 
+  /* 🔥 목록은 **한 번의 evaluate 로 통째로** 읽는다. 행마다 locator 로 왕복하면
+     (nth(i) × 필드 3개 = 100명이면 300왕복) 읽는 도중 Vue 가 목록을 다시 그릴 때
+     인덱스가 밀려 **같은 행을 두 번 읽고 다른 행을 통째로 빠뜨린다.**
+     실측(2026-08-12 백필 첫 실행): 옥수 07-29 에서 44행을 읽었는데 서로 다른 사람은
+     35명뿐이었다 — 8명이 조용히 사라졌고, 재실행하니 43명이 정상으로 나왔다.
+     ⚠️ 인원수 검증은 **개수만** 보므로 이 오류를 못 잡는다. 원자적으로 읽는 게 유일한 방어다.
+     (덤으로 왕복이 사라져 훨씬 빠르다.) */
+  const raw = await page.evaluate(
+    ({ listSel, nameSel, ticketSel, statusSel }) => {
+      const txt = (el) => (el ? el.textContent || '' : '');
+      return [...document.querySelectorAll(listSel)].map((li) => ({
+        회원: txt(li.querySelector(nameSel)),
+        수강권: txt(li.querySelector(ticketSel)),
+        // Element UI 셀렉트 — 선택값은 textContent 가 아니라 input.value 에 있다
+        예약상태: li.querySelector(statusSel)?.value ?? '',
+      }));
+    },
+    {
+      listSel: SELECTORS.bookings.list,
+      nameSel: SELECTORS.booking.회원,
+      ticketSel: SELECTORS.booking.수강권,
+      statusSel: SELECTORS.booking.예약상태,
+    },
+  );
+
   const out = [];
   let 대기수 = 0;
-  for (let i = 0; i < n; i++) {
-    const row = rows.nth(i);
-    const 예약상태 = await text(row, SELECTORS.booking.예약상태);
+  for (const r of raw) {
+    const 예약상태 = normText(r.예약상태);
     if (normStatus(예약상태) === WAITLIST) 대기수++;
-    const { 이름, 연락처 } = parseMemberLine(await text(row, SELECTORS.booking.회원));
+    const { 이름, 연락처 } = parseMemberLine(r.회원);
     if (!이름) continue;
-    const ticket = parseTicketLine(await text(row, SELECTORS.booking.수강권));
+    const ticket = parseTicketLine(r.수강권);
     out.push({
       예약일자: 예약일자 || fallbackDate,
       수업시간,
@@ -283,6 +307,16 @@ async function readLecture(page, fallbackDate) {
       예약상태,
       ...ticket,
     });
+  }
+
+  /* 원자적으로 읽었으니 같은 사람이 두 번 나오면 그건 **진짜 중복**이다(위 경합이 아니다).
+     res_key 가 같아 저장 때 한 건으로 접히므로, 조용히 넘기지 말고 알려 준다. */
+  const 키 = out.map((r) => `${r.이름}|${String(r.연락처).replace(/\D/g, '')}`);
+  const 중복 = 키.length - new Set(키).size;
+  if (중복) {
+    console.warn(
+      `  ⚠️ ${수업명} ${수업시간}: 같은 사람이 ${중복}번 중복 표시됩니다 — 저장 시 1건으로 접힙니다.`,
+    );
   }
 
   /* 대기 라벨과 상태값이 어긋나면 둘 중 하나가 바뀐 것이다. 그냥 두면 대기자가

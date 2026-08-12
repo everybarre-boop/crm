@@ -152,17 +152,31 @@ async function main() {
           }
 
           let 저장 = 0;
+          let 중복 = 0;
+          let 파싱실패 = 0;
           for (const [branch, list] of byBranch) {
             const res = await saveReservations(list, { branch, targetDate: date, dryRun });
             저장 += res.saved ?? 0;
+            중복 += res.duplicates ?? 0;
+            파싱실패 += (res.requested ?? 0) - (res.parsed ?? res.requested ?? 0);
           }
           행합 += rows.length;
           저장합 += 저장;
 
+          /* 수집한 것보다 적게 저장됐으면 **왜** 줄었는지 반드시 드러낸다. 그냥 "저장 45건"만
+             찍히면 7건이 사라진 걸 아무도 모른다(실측: 그래서 스크랩 경합을 늦게 발견했다). */
+          const 손실 = [
+            파싱실패 ? `날짜 파싱 실패 ${파싱실패}건` : '',
+            중복 ? `res_key 중복 ${중복}건` : '',
+          ]
+            .filter(Boolean)
+            .join(' · ');
+
           console.log(
             `[backfill] ${site.label} ${date}: 수업 ${수업수}개 · 예약 ${rows.length}건` +
               (대기 ? ` (대기 ${대기})` : '') +
-              (dryRun ? ' (dry-run)' : ` → 저장 ${저장}건`),
+              (dryRun ? ' (dry-run)' : ` → 저장 ${저장}건`) +
+              (손실 ? `  ⚠️ ${손실}` : ''),
           );
           if (누락) {
             // 조용히 넘기면 그 수업 예약자가 통째로 빠진 채 "관측했다"고 기록된다

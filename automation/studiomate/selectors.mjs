@@ -112,18 +112,17 @@ export const SELECTORS = {
         ⚠️ 위 countLabel 과 겹치지 않는다. "예약 대기 회원"에는 "예약회원"이 안 들어간다. */
     waitLabel: 'h5:has-text("예약 대기")',
   },
+  /* 예약자 행 안의 필드 — 전부 **li 기준 하위 CSS 셀렉터**여야 한다.
+     scrape.mjs 가 이 값들을 브라우저 안으로 넘겨 `li.querySelector(...)` 로 한 번에 읽는다
+     (행마다 왕복하면 읽는 도중 목록이 다시 그려져 같은 행을 두 번 읽는다 — 아래 참고). */
   booking: {
     /** "박진화 · 010-3850-9069" — normalize 가 이름/연락처로 쪼갠다 */
     회원: '.members-list-item__name a',
     /** "바레 그룹 40회(판교) · 12회 남음 · 2026. 5. 8.~2026. 11. 3." */
     수강권: '.members-list-item__ticket-info',
-    /* 예약상태는 텍스트가 아니라 **readonly input 의 value** 다.
-       (Element UI 셀렉트라 선택값이 textContent 에 안 나온다) */
-    예약상태: async (row) => {
-      const el = row.locator('.members-list-item__select input').first();
-      if (!(await el.count())) return '';
-      return (await el.inputValue()) || '';
-    },
+    /* ⚠️ 예약상태는 텍스트가 아니라 **readonly input 의 value** 다
+       (Element UI 셀렉트라 선택값이 textContent 에 안 나온다) → `.value` 로 읽는다. */
+    예약상태: '.members-list-item__select input',
   },
 };
 
