@@ -295,16 +295,29 @@ async function readLecture(page, fallbackDate) {
     .waitFor({ timeout: TIMING.waitTimeout })
     .catch(() => {});
 
-  const 예약N = 명수(await text(page, SELECTORS.bookings.countLabel));
-  // 대기자가 없는 수업엔 라벨 자체가 없다 → NaN → 0
+  let 라벨 = await text(page, SELECTORS.bookings.countLabel);
+  if (!라벨) {
+    await page.waitForTimeout(TIMING.emptySettle); // 렌더가 한 박자 늦는 경우 대비
+    라벨 = await text(page, SELECTORS.bookings.countLabel);
+  }
+  const 예약N = 명수(라벨);
+  // 대기자가 없는 수업엔 대기 라벨 자체가 없다 → NaN → 0
   const 대기M = 명수(await text(page, SELECTORS.bookings.waitLabel)) || 0;
 
+  /* ⚠️ **예약자가 0명인 수업엔 "예약회원 (N명)" 라벨이 아예 없다**
+     (실측 2026-08-13 광교 11:00·19:00 — 라벨이 "수강회원"과 "예약 취소" 뿐이고 li 도 0개).
+     그래서 라벨 부재를 곧바로 실패로 보면 **멀쩡한 빈 수업 하나가 그 지점 전체를 끊는다**
+     (실측: 광교·반포 명단이 통째로 빠졌다).
+     구분은 li 개수로 한다 — 위에서 헤더 제목이 채워질 때까지 기다렸으므로 수업 데이터는
+     이미 도착한 상태다(제목과 예약자 목록은 같은 응답에서 그려진다).
+       · 라벨 없음 + li 0개   → 진짜 예약자 0명. 정상이다.
+       · 라벨 없음 + li 있음  → 앞뒤가 안 맞는다. 실패시킨다. */
   if (!Number.isFinite(예약N)) {
-    // 검증 없이 읽느니 실패한다 — 검증을 못 하면 "0명"과 "아직 안 그려짐"을 구분할 수 없다
+    const li수 = await rows.count();
+    if (li수 === 0) return [];
     throw new Error(
-      `"예약회원 (N명)" 라벨을 읽지 못했습니다 (${수업명} ${수업시간}). ` +
-        `이대로 읽으면 아직 안 그려진 목록을 예약자 0명으로 내보냅니다. ` +
-        `selectors.mjs 의 bookings.countLabel 을 확인하세요.`,
+      `"예약회원 (N명)" 라벨이 없는데 예약자 행은 ${li수}개입니다 (${수업명} ${수업시간}). ` +
+        `검증을 못 하므로 읽지 않습니다. selectors.mjs 의 bookings.countLabel 을 확인하세요.`,
     );
   }
 
