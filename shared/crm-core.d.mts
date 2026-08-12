@@ -20,6 +20,8 @@ export function ticketType(수강권명: unknown): string;
 export function isTrial(rec: Rec): boolean;
 
 export function phoneDigits(v: unknown): string;
+/** 이름의 임시 표식('미수금' 등) 제거. SQL 짝은 public.norm_person_name(). */
+export function normPersonName(name: unknown): string;
 export function personKey(rec: Rec): string;
 export function makePersonResolver(
   ...rowSets: Array<readonly Rec[] | null | undefined>

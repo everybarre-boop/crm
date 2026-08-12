@@ -7,7 +7,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_RULES, buildCrm } from '../../shared/crm-rules.mjs';
-import { makePersonResolver, usedCount, dateKST, daysBetween } from '../../shared/crm-core.mjs';
+import {
+  makePersonResolver,
+  normPersonName,
+  personKey,
+  usedCount,
+  dateKST,
+  daysBetween,
+} from '../../shared/crm-core.mjs';
 
 const TODAY = '2026-08-05';
 const TOMORROW = '2026-08-06';
@@ -406,6 +413,40 @@ test('예약대기가 섞여도 확정 예약자는 그대로 잡힌다', () => 
 /* 스크래퍼의 상태 정규화 — 화면 원문이 규칙 엔진이 아는 어휘로 접히는지 고정한다.
    ⚠️ 여기가 깨지면 규칙 쪽 NOT_ATTENDING 이 멀쩡해도 대기자가 새어 나간다.
       두 파일이 짝이라 테스트도 한자리에 둔다. */
+/* '미수금'은 결제 전에 수강권을 미리 발급했을 때 이름 뒤에 붙는 표식이고 결제되면 지워진다.
+   즉 같은 사람의 이름이 시점에 따라 달라진다 — 안 떼면 한 사람이 둘로 세어져
+   누적 횟수가 쪼개지고 마일스톤 회차가 틀린다. SQL 짝은 public.norm_person_name(). */
+test('normPersonName — 이름의 미수금 표식을 뗀다', () => {
+  assert.equal(normPersonName('손정미 미수금'), '손정미');
+  assert.equal(normPersonName('구현정 미수금'), '구현정');
+  assert.equal(normPersonName('이지은 미수금P'), '이지은');
+  assert.equal(normPersonName('조윤서미수금p'), '조윤서');
+  assert.equal(normPersonName('ISHIGAKI 체험 전액미수금'), 'ISHIGAKI 체험');
+  // 표식이 없으면 그대로
+  assert.equal(normPersonName('홍길동'), '홍길동');
+  assert.equal(normPersonName('  김민정 '), '김민정');
+  // 이름 전체가 표식이면 원본을 남긴다(과잉 정규화로 사람을 잃지 않는다)
+  assert.equal(normPersonName('미수금'), '미수금');
+  assert.equal(normPersonName(''), '');
+});
+
+test('personKey — 결제 전후로 같은 사람이 갈리지 않는다', () => {
+  const before = { 이름: '손정미 미수금', 연락처: '010-7737-0224' };
+  const after = { 이름: '손정미', 연락처: '01077370224' };
+  assert.equal(personKey(before), personKey(after));
+});
+
+test('누적 횟수가 미수금 표식 때문에 쪼개지지 않는다', () => {
+  const rows = [
+    mem({ dedup_key: 'a', 이름: '손정미 미수금', 연락처: '010-7737-0224', 전체횟수: '20', 잔여횟수: '15' }),
+    mem({ dedup_key: 'b', 이름: '손정미', 연락처: '010-7737-0224', 전체횟수: '20', 잔여횟수: '13' }),
+  ];
+  const keyOf = makePersonResolver(rows);
+  assert.equal(keyOf(rows[0]), keyOf(rows[1]), '같은 사람으로 묶여야 한다');
+  // 5회 + 7회 = 12회가 한 사람의 누적이 된다
+  assert.equal(rows.reduce((s, r) => s + usedCount(r), 0), 12);
+});
+
 test('normStatus — 화면 원문 어휘를 표준값으로 접는다', async () => {
   const { normStatus, WAITLIST } = await import('../studiomate/normalize.mjs');
   // 실측 원문 (2026-08-12, 청담·판교 27개 수업)

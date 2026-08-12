@@ -64,8 +64,31 @@ export function phoneDigits(v) {
   return String(v ?? '').replace(/[^0-9]/g, '');
 }
 
+/* ----------------------------------------------------------------------
+   이름에 붙는 임시 표식 제거 — 사람 식별의 전처리.
+
+   🔥 '미수금'은 **결제 전에 수강권을 미리 발급했을 때 이름 뒤에 붙는 운영 표식**이고,
+      결제되면 지워진다(운영 확인 2026-08-12). 즉 **같은 사람의 이름이 시점에 따라 달라진다.**
+      그대로 두면 personKey 가 갈려 한 사람이 둘로 세어진다:
+        · 전 지점 합산 누적 사용횟수가 쪼개져 **마일스톤 회차가 틀린다**
+        · 마지막 출석이 다른 사람 것으로 잡혀 **휴면(14일 미방문) 판정이 어긋난다**
+        · 슬랙 멘트에 "손정미 미수금님, …" 으로 나간다
+      실제 표기(실측): "손정미 미수금" · "이지은 미수금P" · "조윤서미수금p" · "… 전액미수금"
+
+   ⚠️ 떼고 나서 이름이 비면 **원본을 그대로 둔다** — 과잉 정규화로 사람을 잃지 않기 위함.
+   ⚠️ SQL 쪽 짝은 public.norm_person_name() 이다(sql/2026-08_name_normalize.sql).
+      한쪽만 고치면 "코드가 만드는 값 ↔ DB 가 만드는 값"이 어긋난다 — 둘 다 고칠 것.
+   ---------------------------------------------------------------------- */
+const NAME_MARKER = /\s*(전액)?\s*미수금\s*[Pp]?/g;
+
+export function normPersonName(name) {
+  const raw = String(name ?? '').trim();
+  const cleaned = raw.replace(NAME_MARKER, ' ').replace(/\s+/g, ' ').trim();
+  return cleaned || raw;
+}
+
 export function personKey(rec) {
-  return String(rec['이름'] ?? '').trim() + KEY_SEP + phoneDigits(rec['연락처']);
+  return normPersonName(rec['이름']) + KEY_SEP + phoneDigits(rec['연락처']);
 }
 
 /* ----------------------------------------------------------------------
@@ -92,7 +115,7 @@ export function makePersonResolver(...rowSets) {
   for (const rows of rowSets) {
     if (!rows) continue;
     for (const r of rows) {
-      const name = String(r['이름'] ?? '').trim();
+      const name = normPersonName(r['이름']);
       if (!name) continue;
       const ph = phoneDigits(r['연락처']);
       if (!ph) continue;
@@ -106,7 +129,7 @@ export function makePersonResolver(...rowSets) {
   const fallbackIds = new WeakMap();
   let fallbackSeq = 0;
   return (rec) => {
-    const name = String(rec['이름'] ?? '').trim();
+    const name = normPersonName(rec['이름']);
     const ph = phoneDigits(rec['연락처']);
     if (ph) return name + KEY_SEP + ph;
     const set = phonesByName.get(name);

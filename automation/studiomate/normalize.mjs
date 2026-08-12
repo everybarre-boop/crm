@@ -10,7 +10,7 @@
 //   "2026년 8월 11일 화요일 · 09:30 ~ 10:20"
 // 그래서 파서가 여기 모여 있다.
 // ============================================================================
-import { branchOf, ymdNum, ymdText } from '../../shared/crm-core.mjs';
+import { branchOf, normPersonName, ymdNum, ymdText } from '../../shared/crm-core.mjs';
 
 /** 공백 정리. nbsp 같은 것도 평범한 공백으로. */
 export function normText(s) {
@@ -178,7 +178,10 @@ export function toReservationRecord(raw, { branch, date }) {
     수업시간: normTime(raw.수업시간),
     수업명: normText(raw.수업명),
     강사: normText(raw.강사),
-    이름: normText(raw.이름),
+    /* '미수금' 같은 임시 표식을 여기서 뗀다(경계에서 한 번만).
+       안 떼면 결제 전후로 res_key 가 갈려 같은 예약이 두 행이 되고,
+       person_key 도 갈려 누적 횟수가 쪼개진다. crm-core 의 normPersonName 참고. */
+    이름: normPersonName(normText(raw.이름)),
     연락처: normPhone(raw.연락처),
     수강권명,
     예약상태: normStatus(raw.예약상태),
