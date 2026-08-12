@@ -307,7 +307,7 @@ async function readLecture(page, fallbackDate) {
        CRM 대상에서만 crm-rules.mjs 의 NOT_ATTENDING 이 뺀다).
    실패는 삼키지 않고 throw 한다.
    ---------------------------------------------------------------------- */
-export async function scrapeBranch(page, site, { date }) {
+export async function scrapeBranch(page, site, { date, navigate = true }) {
   if (!site.slug) throw new Error(`[${site.label ?? site.slug}] slug 미설정`);
   if (!selectorsReady()) {
     throw new Error(
@@ -315,10 +315,16 @@ export async function scrapeBranch(page, site, { date }) {
     );
   }
 
-  await page.goto(URLS.schedule(site.slug), {
-    waitUntil: 'domcontentloaded',
-    timeout: TIMING.navTimeout,
-  });
+  /* navigate=false 는 백필용이다 — 날짜를 연속으로 훑을 때 매번 /schedule 로 다시 가면
+     캘린더가 오늘로 돌아가 gotoDate 가 목표까지 **처음부터** 한 칸씩 이동한다(30일 백필이면
+     화살표 클릭이 O(n²)). 이미 /schedule 에 있으면 직전 날짜에서 한 칸만 움직이면 된다.
+     단, 어떤 이유로든 /schedule 이 아니면 안전하게 다시 이동한다. */
+  if (navigate || !/\/schedule/.test(page.url())) {
+    await page.goto(URLS.schedule(site.slug), {
+      waitUntil: 'domcontentloaded',
+      timeout: TIMING.navTimeout,
+    });
+  }
   await gotoDate(page, date);
 
   /* ⚠️ 날짜 input 은 즉시 바뀌지만 수업 블록은 API 응답 뒤에 그려진다.

@@ -100,6 +100,13 @@ export const env = {
   MOCK_DATE: process.env.MOCK_DATE || '', // "오늘"을 고정 — 날짜 의존 규칙 재현에 필수
   TARGET_DATE: process.env.TARGET_DATE || '', // D+1 강제(장애 후 수동 재실행)
   STEPS: list('STEPS').length ? list('STEPS') : ALL_STEPS,
+
+  /* 과거 예약 백필(automation/backfill.mjs) 전용. 기본은 "어제부터 14일" —
+     휴면 규칙이 풀리는 최소치다(관측일수 = current_date - min(예약일자)). */
+  BACKFILL_FROM: process.env.BACKFILL_FROM || '',
+  BACKFILL_TO: process.env.BACKFILL_TO || '',
+  BACKFILL_DAYS: process.env.BACKFILL_DAYS || '',
+
   ONLY_BRANCHES: list('ONLY_BRANCHES'), // 쉼표구분 지점명; 비면 전체
   HEADLESS: safeBool('HEADLESS', true), // 라이브 셀렉터 작업 때 false 로 두면 창이 보인다
   RUN_URL: process.env.RUN_URL || '', // GitHub Actions run 링크(실패 알림에 첨부)
@@ -143,11 +150,12 @@ export const SITES = [
    중간에 죽으면 "출석은 반영됐는데 슬랙은 안 나간" 어중간한 상태가 남기 때문에,
    부분 실행을 허용하지 않고 처음부터 멈춘다.
    ---------------------------------------------------------------------- */
-export function preflight() {
+/* steps 를 넘기면 그 단계만 검사한다 — 백필(automation/backfill.mjs)처럼 슬랙을 안 쓰는
+   스크립트가 SLACK_* 미설정만으로 못 돌면 안 된다. 안 넘기면 env.STEPS(=실행 전체). */
+export function preflight(steps = env.STEPS) {
   if (_deferredError) throw _deferredError; // DRY_RUN 등 불리언 값 오타
   const missing = [];
   const warn = [];
-  const steps = env.STEPS;
 
   for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'ADMIN_EMAIL', 'ADMIN_PASSWORD']) {
     if (!env[k]) missing.push(k);

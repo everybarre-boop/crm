@@ -111,7 +111,15 @@ v2 는 입력 1건당 members 1행만 고른다(수강권시작일 정확 일치
 - 예약자 행은 반드시 `li.members-list-item` 으로 잡는다 — `li` 만 쓰면 상태 드롭다운 옵션까지
   잡혀서 11명짜리 수업이 55개가 된다.
 
-### 예약대기 (2026-08-12 실측 · 27개 수업 전수 확인)
+```bash
+# 창을 띄워 놓고 직접 확인
+HEADLESS=false ONLY_BRANCHES=광교 DRY_RUN=true node automation/run.mjs
+```
+
+셀렉터 값은 문자열(CSS), 함수(`async (scope) => string`), `null`(아직 모름) 셋 다 된다.
+`null` 이면 그 필드만 비고 실행 요약에 `못 읽은 필드` 경고가 뜬다.
+
+### 1-6. 예약대기 (2026-08-12 실측 · 27개 수업 전수 확인)
 
 수업 상세의 회원 목록은 **한 덩어리가 아니다.**
 
@@ -137,13 +145,35 @@ div.lecture-members
   그래서 `save_reservations` 의 `on conflict` 는 `예약대기` 를 `예약` 과 같은 **미확정**으로 본다.
 - 실행 로그에 `· 그중 예약대기 N명(CRM 제외)` 이 찍힌다 — 몇 명이 빠졌는지 매일 보인다.
 
+### 1-7. 과거 예약 백필 — "14일 미방문"을 첫날부터
+
+휴면 규칙은 예약 스냅샷이 쌓여야 동작한다(`관측일수 = current_date - min(예약일자)`).
+매일 실행만으로는 14일을 기다려야 하는데, 스튜디오메이트는 **과거 날짜를 조회할 수 있어서**
+그 14일을 미리 채울 수 있다.
+
 ```bash
-# 창을 띄워 놓고 직접 확인
-HEADLESS=false ONLY_BRANCHES=광교 DRY_RUN=true node automation/run.mjs
+# ① 먼저 dry-run 으로 건수만 (저장 안 함)
+DRY_RUN=true npm run backfill
+
+# ② 실제 저장. 기본은 "어제부터 14일" — 30일치를 권장한다(여유 있게)
+DRY_RUN=false BACKFILL_DAYS=30 npm run backfill
+
+# 기간 직접 지정 / 한 지점만
+DRY_RUN=false BACKFILL_FROM=2026-07-15 BACKFILL_TO=2026-08-11 npm run backfill
+DRY_RUN=false ONLY_BRANCHES=광교 npm run backfill
 ```
 
-셀렉터 값은 문자열(CSS), 함수(`async (scope) => string`), `null`(아직 모름) 셋 다 된다.
-`null` 이면 그 필드만 비고 실행 요약에 `못 읽은 필드` 경고가 뜬다.
+- ⛔️ **백필은 `reservations` 만 채운다 — `apply_attendance` 를 부르지 않는다.**
+  수업 상세의 "12회 남음"은 그 날짜의 값이 아니라 **회원의 현재 잔여횟수**다. 과거 날짜를
+  돌며 members 를 갱신하면 같은 값을 수백 번 덮어쓸 뿐이고, 중간에 실패하면 어디까지
+  반영됐는지도 알 수 없다. 출석 반영은 매일 도는 `run.mjs` 가 D-1 에 대해서만 한다.
+- **오늘·미래 날짜는 거부한다.** 내일 예약은 `run.mjs` 의 roster 단계가 맡는다.
+- **중단해도 안전하다.** 끝낸 (사이트,날짜)를 `automation/out/backfill-progress.local.json`
+  에 남겨 재실행 때 건너뛴다(`RESET_PROGRESS=true` 로 초기화). 실패한 날짜는 기록하지
+  않으므로 그대로 다시 돌리면 그것만 재시도한다. dry-run 은 진행 파일에 아무것도 안 남긴다.
+- 시간이 꽤 걸린다 — 날짜마다 전 수업 상세를 연다. 사이트를 바깥 루프에 둬서 로그인은
+  사이트당 1회고, 날짜는 화살표로 한 칸씩만 움직인다(`navigate:false`).
+- 끝나면 관측일수를 확인한다: `npm run db:sql sql/2026-08_verify_crm.sql`
 
 ---
 

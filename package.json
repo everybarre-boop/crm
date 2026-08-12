@@ -16,6 +16,7 @@
     "db:backup": "node scripts/backup-table.mjs",
     "db:sql": "node scripts/run-sql.mjs",
     "daily": "node automation/run.mjs",
+    "backfill": "node automation/backfill.mjs",
     "test:rules": "node --test automation/test/rules.test.mjs"
   },
   "dependencies": {
