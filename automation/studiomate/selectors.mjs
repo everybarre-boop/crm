@@ -81,14 +81,36 @@ export const SELECTORS = {
     강사: '.lecture-info__block__instructor a',
   },
 
-  // ── 예약자 목록 (수업 상세 안) ─────────────────────────────────────────
+  /* ── 예약자 목록 (수업 상세 안) ─────────────────────────────────────────
+     실측 구조 (2026-08-12, 27개 수업 전수 확인):
+
+       div.lecture-members
+         h5 "예약회원 (11명)"
+         div.lecture-members__list > ul > li.members-list-item        ← 예약자
+         h5 "예약 대기 회원 (3명)"                                     ← 대기자가 있을 때만
+         div.lecture-members__list > ul > li.members-list-item        ← 대기자 (별도 ul)
+         h5 "예약 취소"                                                ← 표본 27개에선 행이 0개였다
+
+     🔥 라벨 N 은 li 수와 다르다. 두 가지 이유가 겹친다:
+       ① 결석 행에는 `uncounted` 클래스가 붙고 라벨 N 에서 **빠진다**
+          (27개 수업에서 결석 ⇔ uncounted 가 1:1, 예외 0건).
+       ② 대기자는 자기 라벨("예약 대기 회원 (M명)")로 따로 센다.
+       → 정확한 불변식:  count(li:not(.uncounted)) == N + M
+     예전엔 이걸 몰라 만석 수업에서 "화면은 10명인데 11명이 읽혔습니다"로 실패했다. */
   bookings: {
     /* ⚠️ li 만으로 잡으면 안 된다 — 예약상태 드롭다운의 옵션(취소/출석/결석/노쇼)도
-          li 라서 11명짜리 수업에서 55개가 잡힌다. 반드시 .members-list-item 을 쓴다. */
+          li 라서 11명짜리 수업에서 55개가 잡힌다. 반드시 .members-list-item 을 쓴다.
+       예약자와 대기자를 **둘 다** 잡는다. 구분은 DOM 이 아니라 예약상태 값으로 한다
+       (대기자 li 에는 구분용 클래스가 없다 — 실측 확인). */
     list: 'li.members-list-item',
+    /** 인원수에 세는 행만 — 결석(uncounted)을 뺀 것. 렌더 완료 판정의 기준이다. */
+    counted: 'li.members-list-item:not(.uncounted)',
     /* "예약회원 (11명)" — 목록이 **다 그려졌는지** 판정하는 기대값.
        이게 없으면 렌더 도중에 세어 실행마다 인원이 달라진다(실측: 78/96/88). */
     countLabel: 'h5:has-text("예약회원")',
+    /** "예약 대기 회원 (3명)" — 대기자가 없는 수업엔 아예 없다(그때 M=0).
+        ⚠️ 위 countLabel 과 겹치지 않는다. "예약 대기 회원"에는 "예약회원"이 안 들어간다. */
+    waitLabel: 'h5:has-text("예약 대기")',
   },
   booking: {
     /** "박진화 · 010-3850-9069" — normalize 가 이름/연락처로 쪼갠다 */
@@ -105,8 +127,9 @@ export const SELECTORS = {
   },
 };
 
-/** 예약상태 어휘 — 실제 드롭다운 옵션에서 확인 (미래 수업은 '예약') */
-export const STATUS_VALUES = ['예약', '출석', '결석', '노쇼', '취소'];
+/* 예약상태 어휘 — 정규화 **후**의 값. 화면 원문은 "예약 확정", "예약 대기 (1)" 처럼
+   띄어쓰기·순번이 붙어 나오므로 normalize.mjs 의 normStatus 가 여기로 접는다. */
+export const STATUS_VALUES = ['예약', '예약대기', '출석', '결석', '노쇼', '취소'];
 
 export const TIMING = {
   navTimeout: 30000,

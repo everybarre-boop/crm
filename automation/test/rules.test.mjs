@@ -375,6 +375,52 @@ test('취소·노쇼 예약은 대상에서 제외한다', () => {
   assert.equal(r.messages.length, 0);
 });
 
+/* 만석 수업의 예약대기자 — 아직 자리가 없으므로 "내일 봬요" 계열 멘트가 나가면 안 된다.
+   실측(2026-08-12 판교 19:00)에서 대기 3명이 예약자로 섞였다. */
+test('예약대기는 대상에서 제외한다', () => {
+  const r = run({
+    memberRows: [mem({ 수강권명: '체험권 (광교)' })],
+    rosterRows: [resv({ 수강권명: '체험권 (광교)', 예약상태: '예약대기' })],
+  });
+  assert.equal(r.messages.length, 0);
+  assert.equal(r.stats.예약, 0);
+});
+
+/* 같은 수업에 확정자와 대기자가 섞여 있어도 확정자만 남아야 한다. */
+test('예약대기가 섞여도 확정 예약자는 그대로 잡힌다', () => {
+  const r = run({
+    memberRows: [
+      mem({ dedup_key: 'a', 이름: '홍길동', 연락처: '010-1111-2222', 수강권명: '체험권 (광교)' }),
+      mem({ dedup_key: 'b', 이름: '김대기', 연락처: '010-3333-4444', 수강권명: '체험권 (광교)' }),
+    ],
+    rosterRows: [
+      resv({ 수강권명: '체험권 (광교)', 예약상태: '예약' }),
+      resv({ 이름: '김대기', 연락처: '010-3333-4444', 수강권명: '체험권 (광교)', 예약상태: '예약대기' }),
+    ],
+  });
+  assert.equal(r.stats.예약, 1);
+  assert.equal(r.messages.length, 1);
+  assert.equal(r.messages[0].이름, '홍길동');
+});
+
+/* 스크래퍼의 상태 정규화 — 화면 원문이 규칙 엔진이 아는 어휘로 접히는지 고정한다.
+   ⚠️ 여기가 깨지면 규칙 쪽 NOT_ATTENDING 이 멀쩡해도 대기자가 새어 나간다.
+      두 파일이 짝이라 테스트도 한자리에 둔다. */
+test('normStatus — 화면 원문 어휘를 표준값으로 접는다', async () => {
+  const { normStatus, WAITLIST } = await import('../studiomate/normalize.mjs');
+  // 실측 원문 (2026-08-12, 청담·판교 27개 수업)
+  assert.equal(normStatus('예약 대기 (1)'), WAITLIST);
+  assert.equal(normStatus('예약 대기 (2)'), WAITLIST);
+  assert.equal(normStatus('예약 확정'), '예약');
+  assert.equal(normStatus('예약'), '예약');
+  assert.equal(normStatus('출석'), '출석');
+  assert.equal(normStatus('결석'), '결석');
+  // 순서 함정 — '예약취소'는 '예약'을, '미출석'은 '출석'을 포함한다
+  assert.equal(normStatus('예약 취소'), '취소');
+  assert.equal(normStatus('미출석'), '결석');
+  assert.equal(normStatus(''), '예약'); // 빈 값은 기본값
+});
+
 test('예약에 연락처가 없으면 members 에서 채운다 (sales 조인이 깨지지 않게)', () => {
   const r = run({
     memberRows: [mem({ 수강권명: '체험권 (광교)' })],

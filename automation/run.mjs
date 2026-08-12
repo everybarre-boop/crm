@@ -135,7 +135,7 @@ async function collect(mode, date) {
   for (const site of SITES) {
     try {
       await ensureLogin(page, site.slug);
-      const { rows, 수업수, 누락, missing } = await scrapeBranch(page, site, { date, mode });
+      const { rows, 수업수, 누락, 대기, missing } = await scrapeBranch(page, site, { date, mode });
       for (const r of rows) {
         const b = r.지점 || '(미지정)';
         if (env.ONLY_BRANCHES.length && !env.ONLY_BRANCHES.includes(b)) continue;
@@ -146,6 +146,8 @@ async function collect(mode, date) {
       const perBranch = [...new Set(rows.map((r) => r.지점 || '(미지정)'))].join('/') || '-';
       console.log(
         `[scrape:${mode}] ${site.label} ${date}: 수업 ${수업수}개 · 예약자 ${rows.length}명 (${perBranch})` +
+          // 대기자는 rows 에 포함돼 있고 CRM 대상에서만 빠진다 — 몇 명이 빠지는지 보여야 한다
+          (대기 ? ` · 그중 예약대기 ${대기}명(CRM 제외)` : '') +
           (수업수 > 0 && rows.length === 0 ? '  ⚠️ 수업은 있는데 예약자 0명 — 셀렉터 의심' : ''),
       );
       if (누락) {

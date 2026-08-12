@@ -13,7 +13,9 @@
 // ============================================================================
 import { SELECTORS, TIMING, URLS, selectorsReady } from './selectors.mjs';
 import {
+  WAITLIST,
   normDate,
+  normStatus,
   normText,
   parseLectureDateTime,
   parseMemberLine,
@@ -230,29 +232,44 @@ async function readLecture(page, fallbackDate) {
   const { 예약일자, 수업시간 } = parseLectureDateTime(await text(page, SELECTORS.detail.일시));
 
   /* ⚠️ 목록이 다 그려지기 전에 세면 실행마다 인원이 달라진다(실측: 같은 날이 78/96/88).
-     화면의 "예약회원 (N명)" 이 정답이므로 그 수에 도달할 때까지 기다린다. */
+     화면 라벨이 정답인데, **라벨 수 = li 수가 아니다.** 두 가지가 겹친다:
+       ① 결석 행에는 `uncounted` 클래스가 붙고 "예약회원 (N명)" 에서 빠진다.
+       ② 예약대기자는 "예약 대기 회원 (M명)" 이라는 자기 라벨로 따로 센다.
+     실측 27개 수업에서 예외 없이 성립한 불변식:  count(li:not(.uncounted)) == N + M   */
   const rows = page.locator(SELECTORS.bookings.list);
-  const labelText = await text(page, SELECTORS.bookings.countLabel);
-  const expected = Number((labelText.match(/\((\d+)\s*명/) || [])[1] ?? NaN);
+  const counted = page.locator(SELECTORS.bookings.counted);
+  const 명수 = (s) => Number((normText(s).match(/\((\d+)\s*명/) || [])[1] ?? NaN);
+
+  const 예약N = 명수(await text(page, SELECTORS.bookings.countLabel));
+  // 대기자가 없는 수업엔 라벨 자체가 없다 → NaN → 0
+  const 대기M = 명수(await text(page, SELECTORS.bookings.waitLabel)) || 0;
 
   let n = await rows.count();
-  if (Number.isFinite(expected)) {
+  if (Number.isFinite(예약N)) {
+    const 기대 = 예약N + 대기M;
     const deadline = Date.now() + TIMING.waitTimeout;
-    while (n < expected && Date.now() < deadline) {
+    let c = await counted.count();
+    while (c < 기대 && Date.now() < deadline) {
       await page.waitForTimeout(200);
-      n = await rows.count();
+      c = await counted.count();
     }
-    if (n !== expected) {
+    n = await rows.count();
+    if (c !== 기대) {
       throw new Error(
-        `예약자 목록이 안 맞습니다 — 화면은 ${expected}명인데 ${n}명만 읽혔습니다 ` +
-          `(${수업명} ${수업시간}). 조용히 넘기면 그만큼 CRM 에서 빠집니다.`,
+        `예약자 목록이 안 맞습니다 — 화면은 예약 ${예약N}명 + 대기 ${대기M}명 = ${기대}명인데 ` +
+          `${c}명이 읽혔습니다 (${수업명} ${수업시간} · li 총 ${n}개). ` +
+          `조용히 넘기면 그만큼 CRM 에서 빠집니다. ` +
+          `※ 결석 행(.uncounted)은 화면 인원수에서 빠지므로 이 수에도 안 들어갑니다.`,
       );
     }
   }
 
   const out = [];
+  let 대기수 = 0;
   for (let i = 0; i < n; i++) {
     const row = rows.nth(i);
+    const 예약상태 = await text(row, SELECTORS.booking.예약상태);
+    if (normStatus(예약상태) === WAITLIST) 대기수++;
     const { 이름, 연락처 } = parseMemberLine(await text(row, SELECTORS.booking.회원));
     if (!이름) continue;
     const ticket = parseTicketLine(await text(row, SELECTORS.booking.수강권));
@@ -263,9 +280,19 @@ async function readLecture(page, fallbackDate) {
       강사,
       이름,
       연락처,
-      예약상태: await text(row, SELECTORS.booking.예약상태),
+      예약상태,
       ...ticket,
     });
+  }
+
+  /* 대기 라벨과 상태값이 어긋나면 둘 중 하나가 바뀐 것이다. 그냥 두면 대기자가
+     예약자로 섞여 "내일 봬요" 멘트가 나가므로 여기서 멈춘다. */
+  if (Number.isFinite(예약N) && 대기수 !== 대기M) {
+    throw new Error(
+      `예약대기 인원이 안 맞습니다 — 화면 라벨은 ${대기M}명인데 상태값으로 센 건 ${대기수}명입니다 ` +
+        `(${수업명} ${수업시간}). selectors.mjs 의 bookings.waitLabel 또는 ` +
+        `normalize.mjs 의 '예약대기' 규칙이 화면과 어긋났습니다.`,
+    );
   }
   return out;
 }
@@ -274,8 +301,10 @@ async function readLecture(page, fallbackDate) {
    한 사이트의 하루치 예약자 수집
    site: { slug, defaultBranch }  ← everybarre 는 청담·판교 두 지점이 섞여 있어
          지점은 수강권명에서 뽑고(branchOf), 태그가 없을 때만 defaultBranch 로 폴백한다.
-   반환: { rows, 수업수, missing }
+   반환: { rows, 수업수, 누락, 대기, missing }
      · 수업수 0 은 정상일 수 있다(휴무일). 수업은 있는데 예약자가 0명이면 셀렉터를 의심.
+     · 대기 = 예약대기 행 수. rows 에 **포함돼 있다**(reservations 에는 남기고,
+       CRM 대상에서만 crm-rules.mjs 의 NOT_ATTENDING 이 뺀다).
    실패는 삼키지 않고 throw 한다.
    ---------------------------------------------------------------------- */
 export async function scrapeBranch(page, site, { date }) {
@@ -338,5 +367,6 @@ export async function scrapeBranch(page, site, { date }) {
   const missing = rows.length ? WANTED.filter((f) => rows.every((r) => !r[f])) : [];
   // 못 본 수업이 있으면 조용히 넘기지 않는다
   const 누락 = 수업수 - seen.size;
-  return { rows, 수업수, 누락: 누락 > 0 ? 누락 : 0, missing };
+  const 대기 = rows.filter((r) => r.예약상태 === WAITLIST).length;
+  return { rows, 수업수, 누락: 누락 > 0 ? 누락 : 0, 대기, missing };
 }
