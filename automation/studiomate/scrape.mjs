@@ -242,9 +242,37 @@ async function readLecture(page, fallbackDate) {
   await page.locator(SELECTORS.detail.ready).first().waitFor({ timeout: TIMING.waitTimeout });
   await page.waitForTimeout(TIMING.detailSettle);
 
-  const 수업명 = await text(page, SELECTORS.detail.수업명);
+  /* 🔥 `detail.ready` 는 헤더 **컨테이너**만 보장한다. 그 안의 제목·일시는 데이터가 온 뒤에
+     채워지므로, 바로 읽으면 빈 값을 집는다. 그러면
+       · 수업명 = ''  → res_key 가 정상 행과 달라져 **별개 행**으로 쌓이고
+       · 일시 파싱이 엉뚱한 값을 집어 **스크랩이 돌던 시계 시각**이 수업시간이 된다
+     실측(2026-08-12): 73행이 `수업명='' · 수업시간=18:49~19:02 · 예약일자=오늘` 로 들어갔다.
+     전부 실제 예약이 아니다. 제목이 채워질 때까지 기다리고, 안 채워지면 실패시킨다. */
+  let 수업명 = '';
+  const 헤더deadline = Date.now() + TIMING.waitTimeout;
+  for (;;) {
+    수업명 = await text(page, SELECTORS.detail.수업명);
+    if (수업명) break;
+    if (Date.now() > 헤더deadline) {
+      throw new Error(
+        `수업 상세의 제목이 끝내 비어 있습니다 (${page.url()}). ` +
+          `이대로 읽으면 수업명 없는 행이 별개로 쌓이고 수업시간에 현재 시각이 들어갑니다.`,
+      );
+    }
+    await page.waitForTimeout(200);
+  }
+
   const 강사 = await text(page, SELECTORS.detail.강사);
   const { 예약일자, 수업시간 } = parseLectureDateTime(await text(page, SELECTORS.detail.일시));
+
+  /* 상세가 목표 날짜의 수업인지 확인한다. 화면이 다른 날짜를 보여 주고 있으면
+     그 날짜로 행이 들어가 **엉뚱한 날에 출석이 기록된다.** */
+  if (예약일자 && fallbackDate && 예약일자 !== fallbackDate) {
+    throw new Error(
+      `상세 화면의 날짜(${예약일자})가 목표 날짜(${fallbackDate})와 다릅니다 ` +
+        `(${수업명} ${수업시간}). 캘린더/상세가 서로 다른 날을 보고 있습니다.`,
+    );
+  }
 
   /* ⚠️ 목록이 다 그려지기 전에 세면 실행마다 인원이 달라진다(실측: 같은 날이 78/96/88).
      화면 라벨이 정답인데, **라벨 수 = li 수가 아니다.** 두 가지가 겹친다:
