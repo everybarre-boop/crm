@@ -255,28 +255,46 @@ async function readLecture(page, fallbackDate) {
   const counted = page.locator(SELECTORS.bookings.counted);
   const 명수 = (s) => Number((normText(s).match(/\((\d+)\s*명/) || [])[1] ?? NaN);
 
+  /* 🔥 라벨이 그려질 때까지 **반드시** 기다린다.
+     상세 헤더(detail.ready)는 회원 목록보다 먼저 뜬다. 헤더만 보고 읽으면 라벨이 없어
+     예약N 이 NaN 이 되고, 그러면 아래 검증이 통째로 건너뛰어져 **아직 안 그려진 빈 목록을
+     "예약자 0명"으로 조용히 내보낸다.** 실측(2026-08-12 백필): 8명짜리 수업 하나가 0명으로
+     나가 그날 청담·판교가 94 → 86 건이 됐다. 0행이면 중복 검사도 안 걸려 흔적이 없다.
+     클릭(따뜻한 화면)보다 goto(찬 로드)에서 더 잘 터진다. */
+  await page
+    .locator(SELECTORS.bookings.countLabel)
+    .first()
+    .waitFor({ timeout: TIMING.waitTimeout })
+    .catch(() => {});
+
   const 예약N = 명수(await text(page, SELECTORS.bookings.countLabel));
   // 대기자가 없는 수업엔 라벨 자체가 없다 → NaN → 0
   const 대기M = 명수(await text(page, SELECTORS.bookings.waitLabel)) || 0;
 
-  let n = await rows.count();
-  if (Number.isFinite(예약N)) {
-    const 기대 = 예약N + 대기M;
-    const deadline = Date.now() + TIMING.waitTimeout;
-    let c = await counted.count();
-    while (c < 기대 && Date.now() < deadline) {
-      await page.waitForTimeout(200);
-      c = await counted.count();
-    }
-    n = await rows.count();
-    if (c !== 기대) {
-      throw new Error(
-        `예약자 목록이 안 맞습니다 — 화면은 예약 ${예약N}명 + 대기 ${대기M}명 = ${기대}명인데 ` +
-          `${c}명이 읽혔습니다 (${수업명} ${수업시간} · li 총 ${n}개). ` +
-          `조용히 넘기면 그만큼 CRM 에서 빠집니다. ` +
-          `※ 결석 행(.uncounted)은 화면 인원수에서 빠지므로 이 수에도 안 들어갑니다.`,
-      );
-    }
+  if (!Number.isFinite(예약N)) {
+    // 검증 없이 읽느니 실패한다 — 검증을 못 하면 "0명"과 "아직 안 그려짐"을 구분할 수 없다
+    throw new Error(
+      `"예약회원 (N명)" 라벨을 읽지 못했습니다 (${수업명} ${수업시간}). ` +
+        `이대로 읽으면 아직 안 그려진 목록을 예약자 0명으로 내보냅니다. ` +
+        `selectors.mjs 의 bookings.countLabel 을 확인하세요.`,
+    );
+  }
+
+  const 기대 = 예약N + 대기M;
+  const deadline = Date.now() + TIMING.waitTimeout;
+  let c = await counted.count();
+  while (c < 기대 && Date.now() < deadline) {
+    await page.waitForTimeout(200);
+    c = await counted.count();
+  }
+  const n = await rows.count();
+  if (c !== 기대) {
+    throw new Error(
+      `예약자 목록이 안 맞습니다 — 화면은 예약 ${예약N}명 + 대기 ${대기M}명 = ${기대}명인데 ` +
+        `${c}명이 읽혔습니다 (${수업명} ${수업시간} · li 총 ${n}개). ` +
+        `조용히 넘기면 그만큼 CRM 에서 빠집니다. ` +
+        `※ 결석 행(.uncounted)은 화면 인원수에서 빠지므로 이 수에도 안 들어갑니다.`,
+    );
   }
 
   /* 🔥 목록은 **한 번의 evaluate 로 통째로** 읽는다. 행마다 locator 로 왕복하면
