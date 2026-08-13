@@ -27,6 +27,13 @@
 
 -- 1) norm_person_name — 이름에서 임시 표식을 뗀다 ------------------------------
 --    떼고 나서 비면 원본을 그대로 둔다(과잉 정규화로 사람을 잃지 않기 위함).
+--
+--    2026-08-13 확대: 미수금 외에 **기수(319명)·촬영(25명)** 표식도 뗀다.
+--      · 미수금 계열  "손정미 미수금" · "이지은 미수금P" · "조윤서미수금p" · "… 전액미수금"
+--      · 기수 계열    "○○○ 15기" · "○○○ M1 13기" · "○○○ M2 2기"
+--      · 촬영 계열    "○○○ 촬영X" · "○○○ 촬영x" · "○○○ 촬영 X"
+--    ⛔️ '체험'과 낱글자 'D'/'P' 는 **떼지 않는다** — 이유는 shared/crm-core.mjs 주석 참고
+--       ("체험1" 같은 자리 계정, 뜻이 확인 안 된 D/P 를 떼면 두 사람이 하나로 뭉칠 수 있다).
 create or replace function public.norm_person_name(s text)
 returns text
 language sql
@@ -36,7 +43,16 @@ as $$
            nullif(
              btrim(
                regexp_replace(
-                 regexp_replace(coalesce(s, ''), '\s*(전액)?\s*미수금\s*[Pp]?', ' ', 'g'),
+                 -- 촬영X / 촬영x / 촬영 X
+                 regexp_replace(
+                   -- 15기 / M1 13기 / M2 2기 — 숫자를 요구해 이름의 '기'를 건드리지 않는다
+                   regexp_replace(
+                     -- 미수금 / 전액미수금 / 미수금P
+                     regexp_replace(coalesce(s, ''), '\s*(전액)?\s*미수금\s*[Pp]?', ' ', 'g'),
+                     '\s*(M\s*\d+\s*)?\d+\s*기(?=\s|$)', ' ', 'g'
+                   ),
+                   '\s*촬영\s*[XxOo]?(?=\s|$)', ' ', 'g'
+                 ),
                  '\s+', ' ', 'g'
                )
              ),
@@ -47,7 +63,7 @@ as $$
 $$;
 
 comment on function public.norm_person_name(text) is
-  '이름의 임시 표식(미수금/전액미수금/미수금P) 제거. shared/crm-core.mjs 의 normPersonName() 과 같은 공식이어야 한다.';
+  '이름의 임시 표식(미수금/전액미수금/미수금P, N기·M1 N기, 촬영X) 제거. shared/crm-core.mjs 의 normPersonName() 과 같은 공식이어야 한다.';
 
 
 -- 2) _match_attendance — 이름 비교만 정규화 이름으로 바꾼다 ---------------------
@@ -135,10 +151,21 @@ select '표식 제거 동작' as "항목",
        public.norm_person_name('손정미 미수금')      as "손정미 미수금",
        public.norm_person_name('이지은 미수금P')     as "이지은 미수금P",
        public.norm_person_name('조윤서미수금p')      as "조윤서미수금p",
+       public.norm_person_name('김민정 15기')        as "김민정 15기",
+       public.norm_person_name('박서연 M1 13기')     as "박서연 M1 13기",
+       public.norm_person_name('이유나 촬영X')       as "이유나 촬영X",
        public.norm_person_name('홍길동')             as "표식 없음(그대로)",
        public.norm_person_name('미수금')             as "이름이 표식뿐(원본 유지)";
 
+-- ⛔️ 안 떼는 것들이 정말 안 떼어지는지 — 과잉 정규화 회귀 방지
+select '떼면 안 되는 것' as "항목",
+       public.norm_person_name('체험1')              as "체험1(자리 계정)",
+       public.norm_person_name('정기')               as "정기(이름의 기)",
+       public.norm_person_name('김철수 D')           as "D(뜻 미확인·유지)",
+       public.norm_person_name('김영희P')            as "P(뜻 미확인·유지)";
+
 select '이름에 표식이 붙은 행' as "항목",
-       count(*) filter (where "이름" ~ '미수금')                    as "members",
-       (select count(*) from public.reservations where "이름" ~ '미수금') as "reservations"
+       count(*) filter (where "이름" ~ '미수금')                 as "미수금",
+       count(*) filter (where "이름" ~ '\d+\s*기($|\s)')          as "기수",
+       count(*) filter (where "이름" ~ '촬영')                   as "촬영"
 from public.members;

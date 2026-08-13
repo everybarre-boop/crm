@@ -140,7 +140,7 @@ test('마일스톤 억제: 예전에 100회 멘트를 보냈으면 다시 안 �
     memberRows: [mem({ 전체횟수: '120', 잔여횟수: '21' })],
     rosterRows: [resv()],
     sentHistory: [
-      { person_key: '홍길동01011112222', rule_id: 'milestone', 규칙키: '100', 대상일자: '2026-07-01' },
+      { person_key: '홍길동\u001f01011112222', rule_id: 'milestone', 규칙키: '100', 대상일자: '2026-07-01' },
     ],
   });
   assert.equal(one(r, 'milestone'), undefined);
@@ -152,7 +152,7 @@ test('마일스톤 억제: 같은 날 재실행이면 메시지가 사라지면 
     rosterRows: [resv()],
     // 1차 실행에서 오늘(=targetDate) 발송된 이력. 이게 자기 자신을 억제하면 안 된다.
     sentHistory: [
-      { person_key: '홍길동01011112222', rule_id: 'milestone', 규칙키: '100', 대상일자: TOMORROW },
+      { person_key: '홍길동\u001f01011112222', rule_id: 'milestone', 규칙키: '100', 대상일자: TOMORROW },
     ],
   });
   assert.ok(one(r, 'milestone'), '재실행에서 마일스톤이 사라졌다 — 억제 조건의 대상일자 비교를 확인하라');
@@ -224,6 +224,81 @@ test('신규: 오래 다닌 회원의 재등록은 신규가 아니다 (최대�
     rosterRows: [resv({ 수강권명: '바레 그룹 10회 (광교)' })],
   });
   assert.equal(one(r, 'first-paid'), undefined);
+});
+
+/* 🔥 "앞으로 0회 같이 만들어가요" — 2026-08-13 dry-run 에서 실제로 나간 문구다.
+   반포 '바레 그룹 언리밋권'·송파 '언리밋티드' 는 전체횟수가 비어 있다.
+   언리밋은 30일권이라 횟수를 말하는 것 자체가 맞지 않는다. */
+test('신규: 언리밋은 횟수를 말하지 않는 전용 문구로 나간다', () => {
+  const r = run({
+    memberRows: [
+      mem({ 수강권명: '체험권 (반포)', 전체횟수: '1', 잔여횟수: '0', dedup_key: 't' }),
+      mem({ 수강권명: '바레 그룹 언리밋권 (반포)', 전체횟수: '', 잔여횟수: '', dedup_key: 'u' }),
+    ],
+    rosterRows: [resv({ 수강권명: '바레 그룹 언리밋권 (반포)' })],
+  });
+  const m = one(r, 'first-paid');
+  assert.ok(m, '언리밋 신규 등록이 안 잡혔다');
+  assert.ok(!/0회/.test(m.예시멘트), `"0회" 가 문구에 남아 있다: ${m.예시멘트}`);
+  assert.match(m.예시멘트, /언리밋 등록 대박이에요/);
+  assert.equal(m.근거.언리밋, true);
+});
+
+/* 전체횟수가 30 으로 들어 있는 언리밋(청담·판교·옥수 1,100행)도 같은 문구를 쓴다 —
+   "언리밋이라고 적힌 수강권"이 곧 30일권이라는 운영 정의를 따른다. */
+test('신규: 전체횟수 30 인 언리밋도 언리밋 문구를 쓴다', () => {
+  const r = run({
+    memberRows: [
+      mem({ 수강권명: '체험권 (청담)', 전체횟수: '1', 잔여횟수: '0', dedup_key: 't' }),
+      mem({ 수강권명: '언리미티드(청담)', 전체횟수: '30', 잔여횟수: '30', dedup_key: 'u' }),
+    ],
+    rosterRows: [resv({ 수강권명: '언리미티드(청담)' })],
+  });
+  const m = one(r, 'first-paid');
+  assert.ok(m);
+  assert.match(m.예시멘트, /언리밋 등록 대박이에요/);
+  assert.ok(!/30회/.test(m.예시멘트), '언리밋 문구에 횟수가 들어갔다');
+});
+
+/* ⛔️ 전체횟수가 없는데 언리밋도 아니면 **데이터 결손**이다(실측: '바레 그룹 10회(청담)'
+   전체횟수 0 이 13행). 기본 문구면 "0회", 언리밋 문구면 거짓말이라 아예 안 보낸다. */
+test('신규: 전체횟수 결손 + 언리밋 아님 → 멘트를 보내지 않고 경고를 남긴다', () => {
+  const r = run({
+    memberRows: [
+      mem({ 수강권명: '체험권 (청담)', 전체횟수: '1', 잔여횟수: '0', dedup_key: 't' }),
+      mem({ 수강권명: '바레 그룹 10회(청담)', 전체횟수: '', 잔여횟수: '', dedup_key: 'x' }),
+    ],
+    rosterRows: [resv({ 수강권명: '바레 그룹 10회(청담)' })],
+  });
+  assert.equal(one(r, 'first-paid'), undefined, '결손 데이터로 멘트가 나갔다');
+  assert.ok(
+    r.warnings.some((w) => w.includes('데이터 결손')),
+    '건너뛴 사유가 경고에 안 남았다 — 조용히 사라지면 안 된다',
+  );
+});
+
+/* DB(crm_rules)에 저장된 규칙 행에는 새로 추가한 파라미터 키가 없다.
+   기본값으로 채우지 않으면 새 기능이 배포돼도 조용히 꺼진 채로 돈다. */
+test('규칙 파라미터: DB 행에 없는 키는 코드 기본값으로 채운다', () => {
+  const r = run({
+    memberRows: [
+      mem({ 수강권명: '체험권 (반포)', 전체횟수: '1', 잔여횟수: '0', dedup_key: 't' }),
+      mem({ 수강권명: '바레 그룹 언리밋권 (반포)', 전체횟수: '', 잔여횟수: '', dedup_key: 'u' }),
+    ],
+    rosterRows: [resv({ 수강권명: '바레 그룹 언리밋권 (반포)' })],
+    // 언리밋키워드·언리밋멘트가 **없는** 옛 DB 행을 흉내낸다
+    rules: [
+      {
+        id: 'first-paid', 라벨: '신규 등록 첫 수업', 이모지: '✨', 활성: true, 슬랙발송: true,
+        정렬순서: 30, 재발송억제일수: -1, 파라미터: { 체험이력필수: true, 최대누적: 3 },
+        템플릿: '체험 후 등록하고 첫 수업 · {{수강권명}}',
+        예시멘트: '{{이름}}님, 등록해 주셔서 반가워요! 앞으로 {{전체횟수}}회 같이 만들어가요 😊',
+      },
+    ],
+  });
+  const m = one(r, 'first-paid');
+  assert.ok(m, '옛 DB 행에서 언리밋 분기가 동작하지 않았다');
+  assert.ok(!/0회/.test(m.예시멘트), `"0회" 가 남았다: ${m.예시멘트}`);
 });
 
 /* ==========================================================================
@@ -428,6 +503,39 @@ test('normPersonName — 이름의 미수금 표식을 뗀다', () => {
   // 이름 전체가 표식이면 원본을 남긴다(과잉 정규화로 사람을 잃지 않는다)
   assert.equal(normPersonName('미수금'), '미수금');
   assert.equal(normPersonName(''), '');
+});
+
+/* 기수·촬영 표식(2026-08-13 실측 344명). 미수금과 같은 이유로 뗀다 —
+   과정 등록/수료·촬영 동의 변경 때 붙었다 떼어져 한 사람이 둘로 갈린다. */
+test('normPersonName — 기수·촬영 표식을 뗀다', () => {
+  assert.equal(normPersonName('김민정 15기'), '김민정');
+  assert.equal(normPersonName('박서연 1기'), '박서연');
+  assert.equal(normPersonName('이수민 M1 13기'), '이수민');
+  assert.equal(normPersonName('정하나 M2 2기'), '정하나');
+  assert.equal(normPersonName('이유나 촬영X'), '이유나');
+  assert.equal(normPersonName('최지영 촬영x'), '최지영');
+  assert.equal(normPersonName('한소희 촬영 X'), '한소희');
+  // 표식이 겹쳐 붙어도 전부 떨어진다
+  assert.equal(normPersonName('김하늘 15기 미수금P'), '김하늘');
+});
+
+/* ⛔️ 과잉 정규화 회귀 방지 — 여기가 깨지면 **서로 다른 사람이 한 명으로 뭉친다.**
+   개수는 맞아 보이지만 누적 횟수가 부풀어 마일스톤이 조용히 틀린다. */
+test('normPersonName — 떼면 안 되는 것은 그대로 둔다', () => {
+  // 이름 전체가 표식인 자리 계정 — 떼면 "체험1/체험2/체험3"이 전부 한 사람이 된다
+  assert.equal(normPersonName('체험1'), '체험1');
+  assert.equal(normPersonName('체험2'), '체험2');
+  assert.notEqual(normPersonName('체험1'), normPersonName('체험2'));
+  // 이름 안의 '기' — 숫자를 요구하므로 안 걸린다
+  assert.equal(normPersonName('정기'), '정기');
+  assert.equal(normPersonName('박기수'), '박기수');
+  // 뜻이 확인되지 않은 낱글자 표식은 유지한다(같은 연락처의 다른 가족일 수 있다)
+  assert.equal(normPersonName('김철수 D'), '김철수 D');
+  assert.equal(normPersonName('김영희P'), '김영희P');
+  // 외국어 이름을 훼손하지 않는다
+  assert.equal(normPersonName('Emily Brassfield'), 'Emily Brassfield');
+  assert.equal(normPersonName('Lee Rachel JungMi'), 'Lee Rachel JungMi');
+  assert.equal(normPersonName('Andy GE'), 'Andy GE');
 });
 
 test('personKey — 결제 전후로 같은 사람이 갈리지 않는다', () => {
