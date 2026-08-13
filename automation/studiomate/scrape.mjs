@@ -238,6 +238,34 @@ async function ensureDayView(page) {
   );
 }
 
+/* "수업 0개"가 진짜 휴무일인지, 화면이 엉뚱한 상태인지 가르는 진단.
+   보는 것: 지금 URL · 날짜 input 값 · 어떤 뷰 라디오가 있고 무엇이 선택돼 있는지 ·
+   수업 블록 후보 개수. 회원 PII 는 담지 않는다(캘린더 화면이라 이름이 없다). */
+async function scheduleDiag(page) {
+  try {
+    const dateVal = await page
+      .locator(SELECTORS.calendar.dateInput)
+      .first()
+      .inputValue()
+      .catch(() => '(못 읽음)');
+    const views = [];
+    for (const v of SELECTORS.calendar.dayViewValues) {
+      const radio = page.locator(SELECTORS.calendar.dayViewRadio(v)).first();
+      const n = await radio.count().catch(() => 0);
+      if (!n) {
+        views.push(`${v}=없음`);
+        continue;
+      }
+      const checked = await radio.isChecked().catch(() => null);
+      views.push(`${v}=${checked ? '선택됨' : '있음'}`);
+    }
+    const items = await page.locator(SELECTORS.calendar.classItem).count().catch(() => -1);
+    return `URL=${page.url()} · 날짜input="${dateVal}" · 뷰[${views.join(', ')}] · ${SELECTORS.calendar.classItem} ${items}개`;
+  } catch (err) {
+    return `진단 실패: ${err.message}`;
+  }
+}
+
 async function gotoDate(page, target) {
   // 캘린더 컨트롤이 그려질 때까지 기다린다(로그인 직후엔 아직 없다)
   await page
@@ -514,6 +542,12 @@ export async function scrapeBranch(page, site, { date, navigate = true }) {
         `  ⚠️ [${site.label ?? site.slug}] ${date}: 첫 읽기는 0개였는데 재로드하니 ${수업수}개였습니다. ` +
           '렌더가 예산(emptyBudget)을 넘겼습니다 — 값을 올릴지 검토하세요.',
       );
+    } else {
+      /* 🔥 "휴무일"이라고 결론 내리기 전에 화면 상태를 남긴다.
+         2026-08-13: 러너에서만 송파가 0개로 나왔다(로컬은 같은 시각에 4개).
+         46초를 기다렸으니 렌더 지연이 아니다 — 뷰가 일간으로 안 바뀌었거나
+         날짜가 다른 곳을 보고 있을 수 있다. 로그인 때와 같다: 추측하지 말고 찍는다. */
+      console.warn(`  ⚠️ [${site.label ?? site.slug}] ${date}: 0개 판정 — ${await scheduleDiag(page)}`);
     }
   }
   const rows = [];
