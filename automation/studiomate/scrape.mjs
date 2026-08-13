@@ -477,10 +477,44 @@ export async function scrapeBranch(page, site, { date, navigate = true }) {
      (실측: 실제 12개인 날을 0개로 읽었다). 잠깐 더 기다렸다 다시 센다. */
   const items = page.locator(SELECTORS.calendar.classItem);
   await page.waitForLoadState('networkidle', { timeout: TIMING.waitTimeout }).catch(() => {});
+
+  /* 🔥 0 을 휴무일로 인정하기 전에 **두 단계**를 거친다.
+     ① emptyBudget 만큼 끈질기게 다시 센다(예전엔 4.8초뿐이라 부족했다).
+     ② 그래도 0 이면 **화면을 새로 로드해 한 번 더** 본다. 진짜 휴무일은 재확인해도
+        0 이지만, 렌더 경합은 여기서 풀린다.
+     0 인 채로 넘어가면 그 지점 CRM 이 통째로 사라지는데 **로그는 정상으로 보인다** —
+     조용히 틀리는 자리라 비용을 더 써서라도 확인한다(휴무일에만 20초가 더 든다). */
   let 수업수 = await items.count();
-  for (let i = 0; 수업수 === 0 && i < 4; i++) {
-    await page.waitForTimeout(TIMING.emptySettle);
+  let 재확인 = false;
+  if (수업수 === 0) {
+    const deadline = Date.now() + TIMING.emptyBudget;
+    while (수업수 === 0 && Date.now() < deadline) {
+      await page.waitForTimeout(TIMING.emptySettle);
+      수업수 = await items.count();
+    }
+  }
+  if (수업수 === 0) {
+    재확인 = true;
+    await page.goto(URLS.schedule(site.slug), {
+      waitUntil: 'domcontentloaded',
+      timeout: TIMING.navTimeout,
+    });
+    await gotoDate(page, date);
+    await page.waitForLoadState('networkidle', { timeout: TIMING.waitTimeout }).catch(() => {});
+    const deadline = Date.now() + TIMING.emptyBudget;
     수업수 = await items.count();
+    while (수업수 === 0 && Date.now() < deadline) {
+      await page.waitForTimeout(TIMING.emptySettle);
+      수업수 = await items.count();
+    }
+    if (수업수 > 0) {
+      /* 첫 읽기가 틀렸다는 뜻이다. 고쳐서 넘어가되 **반드시 남긴다** —
+         이 줄이 자주 보이면 예산이 또 모자란 것이다. */
+      console.warn(
+        `  ⚠️ [${site.label ?? site.slug}] ${date}: 첫 읽기는 0개였는데 재로드하니 ${수업수}개였습니다. ` +
+          '렌더가 예산(emptyBudget)을 넘겼습니다 — 값을 올릴지 검토하세요.',
+      );
+    }
   }
   const rows = [];
 
@@ -555,5 +589,7 @@ export async function scrapeBranch(page, site, { date, navigate = true }) {
   // 못 본 수업이 있으면 조용히 넘기지 않는다
   const 누락 = 수업수 - seen.size;
   const 대기 = rows.filter((r) => r.예약상태 === WAITLIST).length;
-  return { rows, 수업수, 누락: 누락 > 0 ? 누락 : 0, 대기, missing };
+  /* 재확인 = "0개로 보여서 화면을 새로 로드해 다시 셌다". 결과가 0이든 아니든 남긴다 —
+     휴무일 판정이 **한 번 읽고 내린 것인지** 구분할 수 있어야 한다. */
+  return { rows, 수업수, 누락: 누락 > 0 ? 누락 : 0, 대기, missing, 재확인 };
 }

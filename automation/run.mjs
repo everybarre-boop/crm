@@ -135,7 +135,7 @@ async function collect(mode, date) {
   for (const site of SITES) {
     try {
       await ensureLogin(page, site.slug);
-      const { rows, 수업수, 누락, 대기, missing } = await scrapeBranch(page, site, { date, mode });
+      const { rows, 수업수, 누락, 대기, missing, 재확인 } = await scrapeBranch(page, site, { date, mode });
       for (const r of rows) {
         const b = r.지점 || '(미지정)';
         if (env.ONLY_BRANCHES.length && !env.ONLY_BRANCHES.includes(b)) continue;
@@ -148,7 +148,10 @@ async function collect(mode, date) {
         `[scrape:${mode}] ${site.label} ${date}: 수업 ${수업수}개 · 예약자 ${rows.length}명 (${perBranch})` +
           // 대기자는 rows 에 포함돼 있고 CRM 대상에서만 빠진다 — 몇 명이 빠지는지 보여야 한다
           (대기 ? ` · 그중 예약대기 ${대기}명(CRM 제외)` : '') +
-          (수업수 > 0 && rows.length === 0 ? '  ⚠️ 수업은 있는데 예약자 0명 — 셀렉터 의심' : ''),
+          (수업수 > 0 && rows.length === 0 ? '  ⚠️ 수업은 있는데 예약자 0명 — 셀렉터 의심' : '') +
+          /* "0개"가 한 번 읽고 내린 판정인지, 재로드까지 해 본 판정인지 구분한다.
+             2026-08-13 러너에서 렌더가 늦어 3개 사이트가 0개로 나갔는데 로그는 정상이었다. */
+          (재확인 ? (수업수 === 0 ? '  (재로드 후에도 0개 — 휴무일로 봅니다)' : '  (재로드 후 확인)') : ''),
       );
       if (누락) {
         // 조용히 지나가면 그 수업 예약자가 통째로 빠진 채 CRM 이 나간다
