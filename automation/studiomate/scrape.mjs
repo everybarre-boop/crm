@@ -22,7 +22,7 @@ import {
   parseTicketLine,
   toReservationRecord,
 } from './normalize.mjs';
-import { daysBetween } from '../../shared/crm-core.mjs';
+import { addDays, daysBetween } from '../../shared/crm-core.mjs';
 
 /* 스크랩이 채워야 하는 필드 — 전 행이 비어 있으면 "셀렉터 미설정"으로 경고한다. */
 const WANTED = ['수업시간', '수업명', '이름', '연락처', '수강권명', '예약상태', '잔여횟수'];
@@ -506,49 +506,66 @@ export async function scrapeBranch(page, site, { date, navigate = true }) {
   const items = page.locator(SELECTORS.calendar.classItem);
   await page.waitForLoadState('networkidle', { timeout: TIMING.waitTimeout }).catch(() => {});
 
-  /* 🔥 0 을 휴무일로 인정하기 전에 **두 단계**를 거친다.
-     ① emptyBudget 만큼 끈질기게 다시 센다(예전엔 4.8초뿐이라 부족했다).
-     ② 그래도 0 이면 **화면을 새로 로드해 한 번 더** 본다. 진짜 휴무일은 재확인해도
-        0 이지만, 렌더 경합은 여기서 풀린다.
-     0 인 채로 넘어가면 그 지점 CRM 이 통째로 사라지는데 **로그는 정상으로 보인다** —
-     조용히 틀리는 자리라 비용을 더 써서라도 확인한다(휴무일에만 20초가 더 든다). */
-  let 수업수 = await items.count();
-  let 재확인 = false;
-  if (수업수 === 0) {
-    const deadline = Date.now() + TIMING.emptyBudget;
-    while (수업수 === 0 && Date.now() < deadline) {
+  /* 🔥 "수업 0개"는 휴무일일 수도, **SPA 가 그 날짜를 아예 안 불러온 것**일 수도 있다.
+     후자면 그 지점 CRM 이 통째로 사라지는데 로그는 정상으로 보인다. 그래서 0 이면
+     전략을 바꿔 가며 세 번 확인하고, 그래도 0 일 때만 휴무일로 인정한다.
+
+     ① 기다린다      — 렌더가 늦은 경우(2026-08-13: 예산이 4.8초뿐이라 3개 지점이 증발).
+     ② 날짜를 흔든다 — **핵심 전략이다.** 전날로 갔다가 다시 돌아와 SPA 가 데이터를
+                       다시 받게 만든다. 실측(2026-08-13 2회차): 날짜input 은 목표일이 맞고
+                       뷰도 일간으로 선택돼 있는데 .event-item 만 0개인 상태가 나온다.
+                       초기 로딩이 끝나기 전에 화살표를 눌러 요청이 유실된 것으로 보인다.
+                       이 상태는 **재로드로 안 풀린다**(같은 경합을 반복한다) — 그래서
+                       "다시 열기"가 아니라 "다시 요청하게 만들기"가 필요하다.
+     ③ 새로 로드한다 — 세션·DOM 이 꼬인 경우의 마지막 수단.
+
+     비용은 **휴무일에만** 붙는다(수업이 있으면 ①에서 끝난다). */
+  const countWithin = async (budget) => {
+    const deadline = Date.now() + budget;
+    let n = await items.count();
+    while (n === 0 && Date.now() < deadline) {
       await page.waitForTimeout(TIMING.emptySettle);
-      수업수 = await items.count();
+      n = await items.count();
+    }
+    return n;
+  };
+
+  let 수업수 = await countWithin(TIMING.emptyBudget);
+  let 재확인 = false;
+  const 전략 = [
+    ['날짜 흔들기', async () => {
+      // 하루 뒤로 갔다가 되돌아온다 — gotoDate 가 매번 날짜를 검증하므로 어긋날 수 없다
+      await gotoDate(page, addDays(date, -1));
+      await page.waitForTimeout(TIMING.daySettle);
+      await gotoDate(page, date);
+    }],
+    ['재로드', async () => {
+      await page.goto(URLS.schedule(site.slug), {
+        waitUntil: 'domcontentloaded',
+        timeout: TIMING.navTimeout,
+      });
+      await gotoDate(page, date);
+    }],
+  ];
+
+  for (const [이름, 시도] of 전략) {
+    if (수업수 > 0) break;
+    재확인 = true;
+    await 시도();
+    await page.waitForLoadState('networkidle', { timeout: TIMING.waitTimeout }).catch(() => {});
+    수업수 = await countWithin(TIMING.emptyBudget);
+    if (수업수 > 0) {
+      /* 첫 읽기가 틀렸다는 뜻이다. 고쳐서 넘어가되 **반드시 남긴다** —
+         이 줄이 자주 보이면 원인이 아직 안 잡힌 것이다. */
+      console.warn(
+        `  ⚠️ [${site.label ?? site.slug}] ${date}: 처음엔 0개였는데 '${이름}' 후 ${수업수}개였습니다.`,
+      );
     }
   }
   if (수업수 === 0) {
-    재확인 = true;
-    await page.goto(URLS.schedule(site.slug), {
-      waitUntil: 'domcontentloaded',
-      timeout: TIMING.navTimeout,
-    });
-    await gotoDate(page, date);
-    await page.waitForLoadState('networkidle', { timeout: TIMING.waitTimeout }).catch(() => {});
-    const deadline = Date.now() + TIMING.emptyBudget;
-    수업수 = await items.count();
-    while (수업수 === 0 && Date.now() < deadline) {
-      await page.waitForTimeout(TIMING.emptySettle);
-      수업수 = await items.count();
-    }
-    if (수업수 > 0) {
-      /* 첫 읽기가 틀렸다는 뜻이다. 고쳐서 넘어가되 **반드시 남긴다** —
-         이 줄이 자주 보이면 예산이 또 모자란 것이다. */
-      console.warn(
-        `  ⚠️ [${site.label ?? site.slug}] ${date}: 첫 읽기는 0개였는데 재로드하니 ${수업수}개였습니다. ` +
-          '렌더가 예산(emptyBudget)을 넘겼습니다 — 값을 올릴지 검토하세요.',
-      );
-    } else {
-      /* 🔥 "휴무일"이라고 결론 내리기 전에 화면 상태를 남긴다.
-         2026-08-13: 러너에서만 송파가 0개로 나왔다(로컬은 같은 시각에 4개).
-         46초를 기다렸으니 렌더 지연이 아니다 — 뷰가 일간으로 안 바뀌었거나
-         날짜가 다른 곳을 보고 있을 수 있다. 로그인 때와 같다: 추측하지 말고 찍는다. */
-      console.warn(`  ⚠️ [${site.label ?? site.slug}] ${date}: 0개 판정 — ${await scheduleDiag(page)}`);
-    }
+    /* 여기까지 왔으면 휴무일로 본다. 다만 **판정 근거를 남긴다** —
+       날짜·뷰·항목수를 봐야 "진짜 휴무"와 "화면이 이상함"을 나중에 가를 수 있다. */
+    console.warn(`  ⚠️ [${site.label ?? site.slug}] ${date}: 0개 판정 — ${await scheduleDiag(page)}`);
   }
   const rows = [];
 
