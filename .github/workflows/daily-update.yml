@@ -98,9 +98,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ⚠️ 22 미만이면 안 된다. @supabase/supabase-js 가 **런타임 내장 WebSocket** 을 쓰는데
+      #    Node 20 에는 전역 WebSocket 이 없어서 DB 호출이 통째로
+      #    "Node.js detected but native WebSocket not found." 로 죽는다(2026-08-13 실측).
+      #    로컬은 Node 24 라 재현되지 않는다 — 러너에서만 터지는 자리다.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install deps
