@@ -58,6 +58,32 @@ export async function loginStudioMate(page, { phone, password, slug, retries = 2
   throw lastErr;
 }
 
+/* ----------------------------------------------------------------------
+   로그인 실패 진단 — "폼이 안 떴다"와 "자격증명이 틀렸다"는 **완전히 다른 사고**인데
+   예전 메시지는 둘을 구분하지 못했다("휴대폰 번호/비밀번호 또는 셀렉터를 확인하세요").
+   2026-08-13 GitHub Actions 전 사이트 로그인 실패에서 실제로 막혔다 — 로컬은 되는데
+   러너에서만 안 되니, 화면에 **무엇이 떠 있었는지**를 알아야 다음 수를 정할 수 있다.
+
+   ⚠️ 로그인 화면이라 회원 PII 는 없다. 그래도 본문은 200자로 자르고, 로그인 이후
+      화면이 잡히는 경우를 대비해 숫자 연속 7자리 이상은 가린다(연락처 형태).
+   ---------------------------------------------------------------------- */
+async function loginDiag(page) {
+  try {
+    const info = await page.evaluate(() => ({
+      title: document.title || '',
+      inputs: document.querySelectorAll('input').length,
+      body: (document.body ? document.body.innerText || '' : '').replace(/\s+/g, ' ').trim().slice(0, 200),
+    }));
+    const body = info.body.replace(/\d{7,}/g, '(숫자생략)');
+    return (
+      `URL=${page.url()} · title="${info.title}" · input ${info.inputs}개` +
+      (body ? ` · 본문 앞부분="${body}"` : ' · 본문이 비어 있습니다(JS 미실행 또는 차단 페이지)')
+    );
+  } catch (err) {
+    return `URL=${page.url()} · 진단 실패: ${err.message}`;
+  }
+}
+
 async function attemptLogin(page, { phone, password, slug }) {
   await page.goto(URLS.login(slug), {
     waitUntil: 'domcontentloaded',
@@ -73,10 +99,20 @@ async function attemptLogin(page, { phone, password, slug }) {
     .catch(() => false);
   if (already) return;
 
-  await page
+  /* 폼이 뜨는지를 **먼저 따로** 판정한다. 여기서 걸리면 자격증명 문제가 아니다 —
+     페이지가 안 그려졌거나(느린 SPA·번들 실패) 차단 페이지가 떴다는 뜻이다. */
+  const formOk = await page
     .locator(SELECTORS.login.phone)
     .first()
-    .waitFor({ timeout: TIMING.waitTimeout });
+    .waitFor({ timeout: TIMING.waitTimeout })
+    .then(() => true)
+    .catch(() => false);
+  if (!formOk) {
+    throw new Error(
+      `[${slug}] 로그인 폼(휴대폰 입력칸)이 뜨지 않았습니다 — 자격증명 문제가 아닙니다. ` +
+        (await loginDiag(page)),
+    );
+  }
   // 셀렉터가 콤마로 묶여 있어 여러 개가 매칭될 수 있다 → strict 모드를 피하려 .first() 를 쓴다
   await page.locator(SELECTORS.login.phone).first().fill(phone, { timeout: TIMING.waitTimeout });
   await page
@@ -110,8 +146,9 @@ async function attemptLogin(page, { phone, password, slug }) {
       })
       .catch(() => '');
     throw new Error(
-      `[${slug}] 스튜디오메이트 로그인 실패 (URL: ${page.url()})` +
-        (msg ? ` — 화면 안내: "${msg}"` : ' — 휴대폰 번호/비밀번호 또는 login 셀렉터를 확인하세요.'),
+      `[${slug}] 스튜디오메이트 로그인 실패 — 폼은 떴으나 로그인이 안 됐습니다` +
+        (msg ? ` · 화면 안내: "${msg}"` : ' · 화면 안내 없음(휴대폰 번호/비밀번호를 확인하세요)') +
+        ` · ${await loginDiag(page)}`,
     );
   }
   await page.waitForLoadState('networkidle', { timeout: TIMING.waitTimeout }).catch(() => {});

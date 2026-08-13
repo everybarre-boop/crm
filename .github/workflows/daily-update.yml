@@ -48,6 +48,12 @@ on:
         description: '부분 실행 (예: roster,crm). 비우면 전체'
         type: string
         default: ''
+      # 장애 재현용 — 전 지점을 돌리면 15분이 걸려 원인 확인이 느리다.
+      # 한 지점만 찍으면 3분이면 결과가 나온다(2026-08-13 로그인 실패 추적에서 필요했다).
+      only_branches:
+        description: '특정 지점만 (예: 광교). 비우면 전체'
+        type: string
+        default: ''
   # schedule:
   #   - cron: '0 12 * * *'   # UTC 12:00 = KST 21:00. 검증이 끝난 뒤 주석 해제.
 
@@ -87,6 +93,7 @@ jobs:
       DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }}
       TARGET_DATE: ${{ inputs.target_date }}
       STEPS: ${{ inputs.steps }}
+      ONLY_BRANCHES: ${{ inputs.only_branches }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
