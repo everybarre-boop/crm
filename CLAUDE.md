@@ -270,8 +270,13 @@ CSV 는 Excel 열람을 전제하므로 `=` `+` `-` `@` 로 시작하는 셀 값
 
 ## 일간 CRM 자동화 (2026-08)
 
-매일 21:00 KST GitHub Actions 1회 실행 → 어제 출석 반영 → 내일 예약자 명단 → CRM 규칙 →
-지점별 슬랙 발송. 피드백은 관리자 페이지에서 받는다.
+매일 21:00 KST GitHub Actions 실행(22:30 예비 1회) → 어제 출석 반영 → 내일 예약자 명단 →
+CRM 규칙 → 지점별 슬랙 발송. 피드백은 관리자 페이지에서 받는다.
+- 🔥 **GitHub 의 `schedule` 은 기본 브랜치의 워크플로만 실행한다.** 기능 브랜치에만 cron 이
+  있으면 영원히 안 돈다(수동 실행만 가능) — 실제로 2026-08-13 이후 5일간 야간 실행이 없었다.
+- 예비 실행(22:30)은 [automation/guard.mjs](automation/guard.mjs) 를 먼저 태운다. 그날 발송이
+  이미 끝났으면 Playwright 설치 전에 끊는다. schedule 은 지연될 뿐 아니라 **스킵**되기도 하는데,
+  스킵은 실행이 없어서 실패 알림조차 없다 — 그 조용한 구멍을 메우는 자리다.
 **운영 매뉴얼(슬랙 앱·Secrets·장애 대응·규칙 표)은 [docs/CRM-SLACK.md](docs/CRM-SLACK.md).**
 
 - **선행 SQL(순서 고정):** [sql/2026-08_apply_attendance_v2.sql](sql/2026-08_apply_attendance_v2.sql)

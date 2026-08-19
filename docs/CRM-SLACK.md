@@ -279,16 +279,46 @@ MOCK_FILE=automation/mock.local.json DRY_RUN=false node automation/run.mjs
 
 ---
 
-## 3. 운영 전환
+## 3. 운영 전환 · 매일 도는 상태 만들기
+
+전환 절차(끝남 — 2026-08-19):
 
 1. `workflow_dispatch` + `dry_run=true` 로 **3~5일** 수동 실행
    - `자동화 로그` 화면에서 지점×날짜 매트릭스에 빈칸이 없는지
    - 미매칭률이 5% 이하인지 (목표 매칭 ≥95%)
    - 슬랙 프리뷰 문구가 어색하지 않은지
 2. `dry_run=false` 로 수동 1회 → 실제 슬랙 메시지 확인
-3. `.github/workflows/daily-update.yml` 의 `schedule` 주석 해제
+3. `.github/workflows/daily-update.yml` 의 `schedule` 주석 해제 ✅
+
+### 🔥 schedule 은 **기본 브랜치**의 워크플로만 실행한다
+
+기능 브랜치에만 cron 이 있으면 **영원히 안 돈다**(수동 `workflow_dispatch` 만 된다).
+실제로 2026-08-13 이후 5일간 야간 실행이 한 번도 없었던 이유가 이것이다 —
+`daily_runs` 의 마지막 비-dry 실행이 2026-08-13, `reservations` 의 최신 날짜가 2026-08-14였다.
+**CRM 자동화 코드가 기본 브랜치(main)에 올라가 있어야 한다.**
+
+### 21:00 본 실행 + 22:30 예비 실행
+
+GitHub 의 schedule 은 지연될 뿐 아니라 부하 시간대엔 **통째로 스킵된다.**
+스킵되면 실행 자체가 없어서 **실패 알림도 없다** — 그날 CRM 이 조용히 빠진다.
+그래서 cron 을 둘 둔다:
+
+| cron (UTC) | KST | 역할 |
+|---|---|---|
+| `0 12 * * *` | 21:00 | 본 실행 |
+| `30 13 * * *` | 22:30 | 예비 — [automation/guard.mjs](../automation/guard.mjs) 를 먼저 태운다 |
+
+`guard.mjs` 는 `crm_slack_posts` 에서 그날 D+1 발송 상태를 본다.
+
+- ok 가 있고 실패가 없으면 → **건너뛴다**(Playwright 설치 전에 끊어서 1분 안에 종료)
+- 실패가 있거나 ok 가 하나도 없으면 → **재실행**
+- 조회 자체가 실패하면 → **재실행**(모르면 도는 게 낫다)
+
+재실행이 안전한 근거는 설계에 있다 — 슬랙은 `crm_slack_posts` 의 ts 로 `chat.update` 하고(새
+메시지가 아니다), 재발송 억제는 `대상일자 <> targetDate` 라 자기 자신을 억제 근거로 쓰지 않는다.
 
 `schedule` 실행은 `DRY_RUN=false`(반영)로 **명시 분기**되어 있다 — `inputs` 폴백에 의존하지 않는다.
+수동 실행의 기본값은 여전히 `dry_run=true` 다.
 
 ---
 
@@ -296,7 +326,8 @@ MOCK_FILE=automation/mock.local.json DRY_RUN=false node automation/run.mjs
 
 | 증상 | 원인 / 조치 |
 |---|---|
-| `자동화 로그`의 마지막 실행이 24시간 초과(빨강) | 워크플로 실패 또는 schedule 미해제. Actions 탭 확인 |
+| `자동화 로그`의 마지막 실행이 24시간 초과(빨강) | 워크플로 실패, 또는 **cron 이 기본 브랜치에 없음**(§3). Actions 탭 확인 |
+| 며칠치 예약 스냅샷이 통째로 빈다 | 그 기간 야간 실행이 없었던 것. `npm run backfill` 로 과거 날짜를 메운다(출석 반영은 안 한다 — CLAUDE.md) |
 | 지점×날짜 매트릭스에서 특정 지점만 계속 빈칸 | 그 지점 slug 오류 또는 화면 구조 변경. `ONLY_BRANCHES=그지점 DRY_RUN=true` 로 재현 |
 | 전 지점 0건 | **로그인 실패**일 가능성이 높다. run.mjs 가 이 경우 fatal 로 멈추고 알린다 |
 | 미매칭이 급증 | 스튜디오메이트 수강권명 표기가 바뀐 것. 주간 엑셀 재업로드로 대부분 해소 |
