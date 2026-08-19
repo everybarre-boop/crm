@@ -33,6 +33,7 @@ export async function buildAndSaveCrm({ rosterRows, today, targetDate, dryRun })
     today,
     targetDate,
     historyDays: inputs.historyDays,
+    historyStart: inputs.historyStart,
   });
 
   for (const w of result.warnings) console.warn(`  ⚠️ ${w}`);

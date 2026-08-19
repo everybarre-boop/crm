@@ -6,11 +6,14 @@
 // ============================================================================
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_RULES, buildCrm } from '../../shared/crm-rules.mjs';
+import { DEFAULT_RULES, buildCrm, verifyMilestone } from '../../shared/crm-rules.mjs';
 import {
+  dedupeTicketRows,
   makePersonResolver,
   normPersonName,
   personKey,
+  personUsedCount,
+  usageAudit,
   usedCount,
   dateKST,
   daysBetween,
@@ -544,15 +547,18 @@ test('personKey — 결제 전후로 같은 사람이 갈리지 않는다', () =
   assert.equal(personKey(before), personKey(after));
 });
 
-test('누적 횟수가 미수금 표식 때문에 쪼개지지 않는다', () => {
+test('누적 횟수가 미수금 표식 때문에 쪼개지지도, 두 번 세어지지도 않는다', () => {
   const rows = [
     mem({ dedup_key: 'a', 이름: '손정미 미수금', 연락처: '010-7737-0224', 전체횟수: '20', 잔여횟수: '15' }),
     mem({ dedup_key: 'b', 이름: '손정미', 연락처: '010-7737-0224', 전체횟수: '20', 잔여횟수: '13' }),
   ];
   const keyOf = makePersonResolver(rows);
   assert.equal(keyOf(rows[0]), keyOf(rows[1]), '같은 사람으로 묶여야 한다');
-  // 5회 + 7회 = 12회가 한 사람의 누적이 된다
-  assert.equal(rows.reduce((s, r) => s + usedCount(r), 0), 12);
+  /* 🔥 두 행은 **같은 수강권 한 장**이다(표식이 붙었다 떼어지는 사이에 두 번 업로드됐다).
+     행을 더하면 5+7=12 가 되는데 실제로 나온 건 7회다 — 이게 2026-08-14 마일스톤
+     오발송(구태희 '10회차', 실제 4회)의 원인이었다. */
+  assert.equal(personUsedCount(rows), 7);
+  assert.equal(rows.reduce((s, r) => s + usedCount(r), 0), 12, '행 단위 합은 여전히 부풀어 있다');
 });
 
 test('normStatus — 화면 원문 어휘를 표준값으로 접는다', async () => {
@@ -623,4 +629,146 @@ test('makePersonResolver: 연락처 빈 행은 그 이름의 연락처가 유일
   assert.equal(k(rows[1]), k(rows[0]), '연락처가 유일하면 붙어야 한다');
   assert.notEqual(k(rows[4]), k(rows[2]), '동명이인이면 붙이면 안 된다');
   assert.notEqual(k(rows[4]), k(rows[3]), '동명이인이면 붙이면 안 된다');
+});
+
+/* ==========================================================================
+   ⑧ 누적 사용횟수 — '행 합'이 아니라 '수강권 등록건 합'  (2026-08-14 오발송 재발 방지)
+   --------------------------------------------------------------------------
+   실제 사고: 반포 구태희에게 '10회차!' 가 나갔는데 실제 출석은 4회였다.
+   members 에 같은 수강권이 표식·결제 때문에 5행으로 남아 있었고, 행을 더해 9회가 됐다.
+   ========================================================================== */
+const 구태희 = [
+  // 체험권 — 이름 표식이 붙은 행과 떼어진 행. 같은 한 장이다.
+  mem({ dedup_key: 'k1', 이름: '구태희 미수금', 수강권명: '체험권 (반포)', 전체횟수: '1', 잔여횟수: '0',
+        수강권시작일: '2026-07-07', 결제일시: '2026-07-07' }),
+  mem({ dedup_key: 'k2', 이름: '구태희', 수강권명: '체험권 (반포)', 전체횟수: '1', 잔여횟수: '0',
+        수강권시작일: '2026-07-07', 결제일시: '2026-07-07' }),
+  // 20회권 — 표식 행(옛 잔여 19) + 결제가 둘로 나뉜 행 2개(잔여 17)
+  mem({ dedup_key: 'k3', 이름: '구태희 미수금', 수강권명: '바레 그룹 20회(반포)', 전체횟수: '20', 잔여횟수: '19',
+        수강권시작일: '2026-07-31', 결제일시: '2026-07-22' }),
+  mem({ dedup_key: 'k4', 이름: '구태희', 수강권명: '바레 그룹 20회(반포)', 전체횟수: '20', 잔여횟수: '17',
+        수강권시작일: '2026-07-31', 결제일시: '2026-07-22' }),
+  mem({ dedup_key: 'k5', 이름: '구태희', 수강권명: '바레 그룹 20회(반포)', 전체횟수: '20', 잔여횟수: '17',
+        수강권시작일: '2026-07-31', 결제일시: '2026-08-06' }),
+];
+
+test('구태희 재현: 중복 행을 접으면 누적은 9 가 아니라 4 다', () => {
+  assert.equal(구태희.reduce((s, r) => s + usedCount(r), 0), 9, '옛 공식(행 합)');
+  assert.equal(personUsedCount(구태희), 4, '체험 1 + 20회권 3');
+  const a = usageAudit(구태희);
+  assert.equal(a.등록건수, 2);
+  assert.equal(a.행수, 5);
+  assert.equal(a.결손, 0);
+  assert.equal(a.최초시작일, 20260707);
+});
+
+test('구태희 재현: 예정 5회차이므로 마일스톤이 나가지 않는다', () => {
+  const r = run({
+    memberRows: 구태희,
+    rosterRows: [resv({ 이름: '구태희', 수강권명: '바레 그룹 20회(반포)' })],
+  });
+  assert.equal(one(r, 'milestone'), undefined, '실제로는 5회차인데 10회차가 나갔던 자리');
+});
+
+test('재등록(같은 수강권명 · 다른 시작일)은 각각 더한다', () => {
+  const rows = [
+    mem({ dedup_key: 'a', 수강권명: '언리미티드(판교) 30회', 전체횟수: '30', 잔여횟수: '0', 수강권시작일: '2026-05-01' }),
+    mem({ dedup_key: 'b', 수강권명: '언리미티드(판교) 30회', 전체횟수: '30', 잔여횟수: '10', 수강권시작일: '2026-06-01' }),
+  ];
+  assert.equal(personUsedCount(rows), 50, '30 + 20 — 재등록은 별개 등록건이다');
+  assert.equal(dedupeTicketRows(rows).length, 2);
+});
+
+test('중복 행 중 옛 잔여를 든 행이 대표가 되지 않는다 (신규 등록 첫 수업 오발동 방지)', () => {
+  const rows = [
+    // 결제일시가 더 늦지만 잔여는 옛 값(= 아직 안 쓴 것처럼 보이는 행)
+    mem({ dedup_key: 'a', 전체횟수: '20', 잔여횟수: '20', 결제일시: '2026-08-06' }),
+    mem({ dedup_key: 'b', 전체횟수: '20', 잔여횟수: '17', 결제일시: '2026-07-22' }),
+    mem({ dedup_key: 'c', 수강권명: '체험권 (광교)', 전체횟수: '1', 잔여횟수: '0', 수강권시작일: '2026-06-01' }),
+  ];
+  const r = run({ memberRows: rows, rosterRows: [resv()] });
+  assert.equal(one(r, 'first-paid'), undefined, '이미 3회 다닌 회원에게 신규 등록 멘트가 나가면 안 된다');
+});
+
+test('휴면 잔여합도 등록건 기준으로 센다', () => {
+  const rows = [
+    mem({ dedup_key: 'a', 이름: '박한결 미수금', 연락처: '010-9999-0000', 전체횟수: '20', 잔여횟수: '17',
+          수강권종료일: '2026-12-31' }),
+    mem({ dedup_key: 'b', 이름: '박한결', 연락처: '010-9999-0000', 전체횟수: '20', 잔여횟수: '17',
+          수강권종료일: '2026-12-31' }),
+  ];
+  const r = run({ memberRows: rows, rosterRows: [], historyDays: 30 });
+  assert.equal(r.dormant.length, 1);
+  assert.equal(r.dormant[0].잔여합, 17, '34 가 되면 잔여 34회 남았다고 응대하게 된다');
+  assert.equal(r.dormant[0].보유수강권.length, 1);
+});
+
+/* ==========================================================================
+   ⑨ 마일스톤 교차검증 — 회차는 사실 단언이므로, 모순이면 보내지 않는다
+   ========================================================================== */
+test('verifyMilestone: 두 기록이 맞으면 통과', () => {
+  const audit = { 누적: 9, 등록건수: 2, 행수: 2, 결손: 0, 시작일결손: 0, 최초시작일: 20260801 };
+  assert.equal(verifyMilestone({ audit, 관측출석: 9, 관측시작: 20260729 }), null);
+});
+
+test('verifyMilestone: 출석 기록이 회원 데이터보다 많으면 보류', () => {
+  const audit = { 누적: 5, 등록건수: 1, 행수: 1, 결손: 0, 시작일결손: 0, 최초시작일: 20260701 };
+  assert.match(String(verifyMilestone({ audit, 관측출석: 7, 관측시작: 20260729 })), /출석 기록/);
+});
+
+test('verifyMilestone: 전 이력이 관측 안인데 수가 다르면 보류', () => {
+  const audit = { 누적: 9, 등록건수: 1, 행수: 1, 결손: 0, 시작일결손: 0, 최초시작일: 20260805 };
+  assert.match(String(verifyMilestone({ audit, 관측출석: 6, 관측시작: 20260729 })), /전 이력/);
+  // 등록이 관측 시작보다 앞서면 과거를 못 봤을 뿐이므로 통과한다
+  const 옛회원 = { ...audit, 최초시작일: 20260701 };
+  assert.equal(verifyMilestone({ audit: 옛회원, 관측출석: 6, 관측시작: 20260729 }), null);
+});
+
+test('verifyMilestone: 전체횟수가 비면 사용횟수를 확정할 수 없다 → 보류', () => {
+  const audit = usageAudit([mem({ 전체횟수: '', 잔여횟수: '5' })]);
+  assert.equal(audit.결손, 1);
+  assert.equal(audit.누적, 0, '음수로 흘러 회차를 밀면 안 된다');
+  assert.match(String(verifyMilestone({ audit, 관측출석: 0, 관측시작: null })), /전체횟수/);
+});
+
+test('마일스톤: 교차검증에 걸리면 발송 대신 보류 + 경고 (실명 없이 건수만)', () => {
+  const rows = [mem({ 전체횟수: '120', 잔여횟수: '21', 수강권시작일: '2026-08-01' })]; // 누적 99 → 예정 100
+  const r = run({
+    memberRows: rows,
+    rosterRows: [resv()],
+    lastAttendance: [{ 이름: '홍길동', 연락처: '010-1111-2222', 마지막출석일: '2026-08-04', 출석횟수: 40 }],
+    historyStart: '2026-07-29', // 등록(8/1)이 관측 시작 이후 = 전 이력 관측
+  });
+  assert.equal(one(r, 'milestone'), undefined);
+  assert.equal(r.보류.length, 1);
+  assert.equal(r.stats.마일스톤보류, 1);
+  const w = r.warnings.find((x) => x.includes('마일스톤'));
+  assert.ok(w, '보류 경고가 있어야 한다');
+  assert.ok(!w.includes('홍길동'), '경고는 운영 채널로 나갈 수 있다 — 실명 금지');
+});
+
+test('마일스톤: 두 기록이 일치하면 그대로 발송한다', () => {
+  const r = run({
+    memberRows: [mem({ 전체횟수: '120', 잔여횟수: '21', 수강권시작일: '2026-08-01' })],
+    rosterRows: [resv()],
+    lastAttendance: [{ 이름: '홍길동', 연락처: '010-1111-2222', 마지막출석일: '2026-08-04', 출석횟수: 99 }],
+    historyStart: '2026-07-29',
+  });
+  const m = one(r, 'milestone');
+  assert.ok(m);
+  assert.equal(m.근거.관측출석, 99);
+});
+
+test('마일스톤: 교차검증=false 면 members 값만으로 보낸다 (탈출구)', () => {
+  const rules = DEFAULT_RULES.map((d) =>
+    d.id === 'milestone' ? { ...d, 파라미터: { ...d.파라미터, 교차검증: false } } : d,
+  );
+  const r = run({
+    rules,
+    memberRows: [mem({ 전체횟수: '120', 잔여횟수: '21', 수강권시작일: '2026-08-01' })],
+    rosterRows: [resv()],
+    lastAttendance: [{ 이름: '홍길동', 연락처: '010-1111-2222', 마지막출석일: '2026-08-04', 출석횟수: 40 }],
+    historyStart: '2026-07-29',
+  });
+  assert.ok(one(r, 'milestone'));
 });

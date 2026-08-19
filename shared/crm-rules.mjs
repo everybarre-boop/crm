@@ -13,6 +13,7 @@
 import {
   addDays,
   daysBetween,
+  dedupeTicketRows,
   isTrial,
   isUsableTicket,
   makePersonResolver,
@@ -21,6 +22,7 @@ import {
   pickTicketRow,
   renderTemplate,
   toInt,
+  usageAudit,
   usedCount,
   ymdNum,
 } from './crm-core.mjs';
@@ -36,7 +38,13 @@ export const DEFAULT_RULES = [
        수업이에요"라 **사실과 다른 말**이 된다(실측: 누적 51회 회원에게 "50번째 수업").
        특히 도입 첫날은 발송 이력이 없어 과거 마일스톤이 전부 소급으로 터진다.
        대신 스크랩이 하루 빠지면 그 회차는 놓친다(월 1회 수준). */
-    파라미터: { 마일스톤: [10, 30, 50, 100, 150, 200, 300, 500], 소급허용: false, 소급한도: 10 },
+    /* 교차검증=true — 회차는 **사실 단언**이라 members 값 하나만 믿고 보내지 않는다.
+       예약 스냅샷(reservations)의 실제 출석 수와 대조해 모순이면 보류한다. 아래 verifyMilestone 참고.
+       끄면 members 값만으로 발송한다(스크랩이 오래 멈춰 보류가 쌓일 때의 탈출구). */
+    파라미터: {
+      마일스톤: [10, 30, 50, 100, 150, 200, 300, 500], 소급허용: false, 소급한도: 10,
+      교차검증: true,
+    },
     템플릿: '*{{마일스톤}}회차!* (누적 {{누적횟수}}회)',
     예시멘트: '{{이름}}님, 오늘로 {{마일스톤}}번째 수업이에요! 꾸준히 나오시는 게 정말 대단해요 👏',
   },
@@ -136,6 +144,38 @@ function isUnlimitedTicket(수강권명, keywords) {
 }
 
 /* ----------------------------------------------------------------------
+   마일스톤 교차검증 — "N회차예요"는 **사실 단언**이다. 틀리면 현장에서 회원에게
+   다른 사실로 응대하게 되고, 그건 안 보내느니만 못하다.
+
+   members(엑셀 업로드 + 야간 apply_attendance)와 reservations(매일 스크랩한 실제 출석)는
+   서로 독립적인 두 기록이다. 둘이 **모순**이면 어느 쪽이 맞는지 알 수 없으므로 보내지 않는다.
+   반환값 = 보류 사유(문자열) / 이상 없으면 null.
+
+     ① 전체횟수 결손        "몇 회짜리 수강권인지"를 모르면 사용횟수(전체−잔여)도 모른다.
+     ② 시작일 결손          등록건을 구분할 수 없다 → 중복 행을 접었는지 보장 못 한다.
+     ③ 출석기록 > 누적      members 가 뒤처졌다(매칭 실패·업로드 지연). 회차를 **낮게** 부른다.
+     ④ 전 이력 관측 + 불일치
+        회원의 첫 수강권시작일이 예약 스냅샷 시작일 이후면, 그 사람이 다닌 모든 수업이
+        스냅샷 안에 있어야 한다. 그런데 수가 다르면 스크랩 누락이거나 members 가 부풀려진
+        것이다 — 어느 쪽이든 회차를 단언할 근거가 없다.
+        (실측 2026-08-19: 전 이력 관측 188명 중 167명 일치 · 21명 불일치)
+
+   ⛔️ "관측이 적으니 관측 쪽을 쓰자"로 가지 말 것. 스크랩이 하루 빠지면 관측도 낮아진다.
+      둘 다 못 믿을 때 지어낸 숫자를 보내는 것이 이 규칙이 막으려는 바로 그 사고다.
+   ---------------------------------------------------------------------- */
+export function verifyMilestone({ audit, 관측출석 = 0, 관측시작 = null }) {
+  if (audit.결손) return '전체횟수가 빈 수강권이 있어 사용횟수를 확정할 수 없습니다';
+  if (audit.시작일결손) return '수강권시작일이 없어 중복 등록건을 구분할 수 없습니다';
+  if (관측출석 > audit.누적)
+    return `출석 기록(${관측출석}회)이 회원 데이터(${audit.누적}회)보다 많습니다 — 회원 데이터가 뒤처졌습니다`;
+  const 전이력관측 =
+    관측시작 !== null && audit.최초시작일 !== null && audit.최초시작일 >= 관측시작;
+  if (전이력관측 && 관측출석 !== audit.누적)
+    return `전 이력이 관측 구간 안인데 출석 기록(${관측출석}회)과 회원 데이터(${audit.누적}회)가 다릅니다`;
+  return null;
+}
+
+/* ----------------------------------------------------------------------
    재발송 억제.
    ⚠️ `대상일자 !== targetDate` 조건이 핵심이다. 이게 없으면 같은 날 재실행할 때
       1차 실행에서 발송된 **자기 자신**이 억제 근거가 되어 메시지가 통째로 사라진다.
@@ -176,6 +216,9 @@ function makeSuppressor(sentHistory, targetDate) {
      today           'YYYY-MM-DD' (KST). 만료 임박·휴면 계산의 기준
      targetDate      'YYYY-MM-DD' = D+1
      historyDays     예약 스냅샷 관측 일수 (crm_history_depth.관측일수)
+     historyStart    예약 스냅샷 최초일 'YYYY-MM-DD' (crm_history_depth.이력시작일).
+                     이 날짜 이후에 등록한 회원은 **전 이력이 관측 안에 있다** → 마일스톤
+                     회차를 실제 출석 기록과 정확히 대조할 수 있다.
 
    출력 { messages, dormant, stats, warnings }
    ---------------------------------------------------------------------- */
@@ -188,6 +231,7 @@ export function buildCrm({
   today,
   targetDate,
   historyDays = 0,
+  historyStart = '',
 }) {
   const R = ruleMap(rules);
   const warnings = [];
@@ -198,23 +242,34 @@ export function buildCrm({
      (판교 이가원 · 반포 이가원이 한 사람이 되는 자리) */
   const keyOf = makePersonResolver(memberRows, rosterRows, lastAttendance);
 
-  // 사람별 members 행 + 전 지점 합산 누적 사용횟수
+  // 사람별 members 행
   const memByPerson = new Map();
-  const usedByPerson = new Map();
   for (const m of memberRows) {
     const k = keyOf(m);
     if (!memByPerson.has(k)) memByPerson.set(k, []);
     memByPerson.get(k).push(m);
-    usedByPerson.set(k, (usedByPerson.get(k) ?? 0) + usedCount(m));
   }
 
-  // 사람별 마지막 출석
+  /* 전 지점 합산 누적 사용횟수 — ⛔️ 행을 그냥 더하지 않는다.
+     같은 수강권 한 장이 이름 표식('구태희' / '구태희 미수금')과 결제 분할 때문에 여러 행으로
+     남고, 그 행들이 **같은 잔여횟수를 각자 들고 있다**. 행 합은 한 번 나온 수업을 2~3번 센다
+     (실측 2026-08-14: 구태희 9회 → 실제 4회, 583명이 부풀려져 있었다).
+     공식은 crm-core 의 usageAudit 한 곳에만 둔다 — 화면(회원 관리·회원 요약)도 같은 함수를 쓴다. */
+  const auditByPerson = new Map();
+  for (const [k, rows] of memByPerson) auditByPerson.set(k, usageAudit(rows));
+
+  // 사람별 마지막 출석 + 관측된 실제 출석 수(마일스톤 교차검증의 근거)
   const lastByPerson = new Map();
+  const 관측출석By = new Map();
   for (const a of lastAttendance) {
     const k = keyOf(a);
     const prev = lastByPerson.get(k);
     if (!prev || String(a.마지막출석일) > String(prev.마지막출석일)) lastByPerson.set(k, a);
+    /* 뷰(crm_last_attendance)는 **표식이 붙은 이름을 따로** 묶으므로 한 사람이 여러 행일 수
+       있다. 각 행의 예약 집합은 서로 겹치지 않으니 더해도 이중 계수가 아니다. */
+    관측출석By.set(k, (관측출석By.get(k) ?? 0) + toInt(a.출석횟수));
   }
+  const 관측시작 = ymdNum(historyStart);
 
   /* ── 예약자 정리 ────────────────────────────────────────────────────
      취소/노쇼/예약대기는 대상이 아니다. 같은 사람이 내일 여러 수업이면 시간 순으로 세어
@@ -227,6 +282,7 @@ export function buildCrm({
   const seq = new Map(); // person → 그날 몇 번째
   let noPhone = 0;
   let noMember = 0;
+  const 보류 = []; // 교차검증에서 걸린 마일스톤 — 보내지 않고 경고로 남긴다
   let 결손 = 0; // 전체횟수가 없는데 언리밋도 아닌 신규 등록 — 멘트를 보내지 않는다
 
   for (const r of roster) {
@@ -257,9 +313,12 @@ export function buildCrm({
       수강권명: r.수강권명 || '',
     };
 
-    // 이 예약의 수강권에 해당하는 members 행(재등록이 여러 행이면 최신 1행)
-    const ticket = pickTicketRow(mem.filter((m) => m.수강권명 === r.수강권명));
-    const 누적횟수 = usedByPerson.get(k) ?? 0;
+    /* 이 예약의 수강권에 해당하는 members 행 1개.
+       ⚠️ 먼저 등록건별로 접는다(dedupeTicketRows) — 같은 등록건의 중복 행 중 **옛 잔여를 든
+          행**이 뽑히면 '신규 등록 첫 수업'(사용횟수 0 조건)이 이미 다닌 회원에게 나간다. */
+    const ticket = pickTicketRow(dedupeTicketRows(mem.filter((m) => m.수강권명 === r.수강권명)));
+    const audit = auditByPerson.get(k) || usageAudit([]);
+    const 누적횟수 = audit.누적;
 
     const vars = {
       이름: base.이름,
@@ -305,12 +364,25 @@ export function buildCrm({
         if (cand !== null && !suppressed(k, 'milestone', String(cand), -1)) hit = cand;
       }
       if (hit !== null) {
-        push('milestone', String(hit), { 마일스톤: hit, 누적횟수: 예정회차 }, {
-          누적횟수: 누적횟수,
-          예정회차,
-          마일스톤: hit,
-          소급: hit !== 예정회차,
-        });
+        const 관측출석 = 관측출석By.get(k) ?? 0;
+        const 검증 =
+          p.교차검증 === false
+            ? null
+            : verifyMilestone({ audit, 관측출석, 관측시작 });
+        if (검증) {
+          보류.push({ 이름: normPersonName(r.이름), 회차: hit, 사유: 검증, 누적횟수, 관측출석 });
+        } else {
+          push('milestone', String(hit), { 마일스톤: hit, 누적횟수: 예정회차 }, {
+            누적횟수: 누적횟수,
+            예정회차,
+            마일스톤: hit,
+            소급: hit !== 예정회차,
+            // 산출 근거를 남긴다 — 화면에서 "왜 이 숫자인가"를 되짚을 수 있어야 한다
+            관측출석,
+            등록건수: audit.등록건수,
+            행수: audit.행수,
+          });
+        }
       }
     }
 
@@ -412,6 +484,16 @@ export function buildCrm({
       `신규 등록 멘트 ${결손}건을 건너뛰었습니다 — 전체횟수가 비었는데 언리밋도 아닙니다(데이터 결손). ` +
         `회원 엑셀에서 그 수강권의 전체횟수를 채우면 다음 실행부터 나갑니다.`,
     );
+  if (보류.length) {
+    /* 🔐 경고는 운영 채널(슬랙)로도 나갈 수 있다 — 실명을 넣지 않는다(PII 는 건수까지). */
+    const 사유별 = new Map();
+    for (const b of 보류) 사유별.set(b.사유, (사유별.get(b.사유) ?? 0) + 1);
+    warnings.push(
+      `마일스톤 ${보류.length}건 보류 — 회차를 확정할 수 없어 보내지 않았습니다. ` +
+        [...사유별].map(([사유, n]) => `${사유} ${n}건`).join(' · ') +
+        `. CRM 실행 화면에서 회원 데이터를 확인하세요.`,
+    );
+  }
   if (noPhone) warnings.push(`연락처를 못 채운 예약 ${noPhone}건 — 결제 전환 집계에서 빠집니다.`);
   if (noMember) warnings.push(`members 에서 못 찾은 예약자 ${noMember}건 — 누적 횟수 기반 규칙이 적용되지 않습니다.`);
 
@@ -430,7 +512,9 @@ export function buildCrm({
     );
   } else {
     for (const [k, rows] of memByPerson) {
-      const usable = rows.filter((m) => isUsableTicket(m, today));
+      /* 등록건별로 접고 센다 — 접지 않으면 중복 행 때문에 잔여합이 부풀어
+         "잔여 53회 남았는데 안 오심"처럼 사실과 다른 명단이 뜬다(실제 17회). */
+      const usable = dedupeTicketRows(rows).filter((m) => isUsableTicket(m, today));
       if (!usable.length) continue; // 잔여>0 + 기간 남음인 수강권이 하나도 없으면 대상 아님
       const la = lastByPerson.get(k);
       const 마지막출석일 = la ? String(la.마지막출석일 ?? '') : '';
@@ -469,9 +553,10 @@ export function buildCrm({
   }
 
   const stats = { 예약: roster.length, 멘트: picked.length, 휴면: dormant.length };
+  if (보류.length) stats.마일스톤보류 = 보류.length;
   for (const m of picked) stats[m.rule_id] = (stats[m.rule_id] ?? 0) + 1;
 
-  return { messages: picked, dormant, stats, warnings };
+  return { messages: picked, dormant, stats, warnings, 보류 };
 }
 
 /** 지점별로 묶기 — 슬랙 발송 단위. */

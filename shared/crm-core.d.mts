@@ -32,6 +32,22 @@ export function regDate(rec: Rec): string;
 export function toInt(v: unknown): number;
 export function usedCount(rec: Rec): number;
 
+/** 수강권 등록건 키 = 수강권명 + US + 수강권시작일 */
+export function ticketKey(rec: Rec): string;
+/** 수강권 등록건별 대표 행 1개 (사용횟수 최대 → 같으면 최신 등록건) */
+export function dedupeTicketRows<T extends Rec>(rows: readonly T[] | null | undefined): T[];
+/** 사람 단위 사용횟수 + 그 값을 믿어도 되는지 */
+export function usageAudit(rows: readonly Rec[] | null | undefined): {
+  누적: number;
+  등록건수: number;
+  행수: number;
+  결손: number;
+  시작일결손: number;
+  최초시작일: number | null;
+};
+/** 사람 단위 누적 사용횟수 (행 단위 Σ usedCount 금지 — 같은 수강권이 여러 행이다) */
+export function personUsedCount(rows: readonly Rec[] | null | undefined): number;
+
 export function ymKey(dateStr: unknown): string;
 export function ymdNum(dateStr: unknown): number | null;
 export function ymdText(n: number | null | undefined): string;

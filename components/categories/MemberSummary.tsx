@@ -5,6 +5,7 @@ import {
   fetchAllRows,
   fmtNum,
   usedCount,
+  personUsedCount,
   toInt,
   ticketType,
   isTrial,
@@ -22,7 +23,9 @@ import { btn, input, card, spinner } from '@/components/ui/styles';
 /* ======================================================================
    회원별 집계 — "이 사람이 지금까지 몇 회 했고 얼마 결제했나"를 1인 단위로.
    members(등록건)·sales(결제건)를 이름+연락처(숫자)로 묶어 CRM의 핵심 데이터를 만든다.
-   - 총 사용횟수 = 그 사람 member 행들의 usedCount(전체−잔여) 합
+   - 총 사용횟수 = 그 사람의 **수강권 등록건별** 사용횟수 합(personUsedCount).
+     ⚠️ member 행을 그냥 더하면 안 된다 — 같은 수강권 한 장이 이름 표식·결제 분할로
+        여러 행이 되고 그 행들이 같은 잔여횟수를 각자 든다(2026-08-14 마일스톤 오발송의 원인).
    - 총 결제금액 = 그 사람 sales 행들의 결제금액 합 (sales가 결제 원장)
    ====================================================================== */
 
@@ -112,11 +115,15 @@ export default function MemberSummary() {
     for (const r of memberRows) {
       const p = get(r);
       p.members.push(r);
-      p.총사용 += usedCount(r);
       if (isTrial(r)) p.체험여부 = true;
       if (isUsableTicket(r)) p.활성 = true;
       if (!p.연락처 && r['연락처']) p.연락처 = String(r['연락처']);
     }
+    /* 총사용은 행을 더하지 않고 **수강권 등록건별로 접어서** 센다.
+       같은 수강권 한 장이 이름 표식('○○○ 미수금')·결제 분할로 여러 행이 되고 그 행들이
+       같은 잔여횟수를 각자 들기 때문이다(실측 583명 부풀림 · 최대 615회). */
+    for (const p of map.values()) p.총사용 = personUsedCount(p.members);
+
     for (const r of salesRows) {
       // 결제 내역은 회원(이름+연락처)에 붙인다. 매칭 안 되는 결제도 사람으로 남긴다.
       const p = get(r);

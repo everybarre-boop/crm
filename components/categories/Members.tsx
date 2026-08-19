@@ -13,7 +13,7 @@ import {
   NUM_COLS,
   makeKey,
   fmtNum,
-  usedCount,
+  personUsedCount,
   sanitizeSearchTerm,
   fetchAllRows,
   makePersonResolver,
@@ -60,7 +60,10 @@ export default function Members() {
      컬럼은 **수강권 1건짜리** 값이라 그걸로 거르면(예전 방식) 한 수강권에서만 100회
      넘게 쓴 행을 찾게 된다 — 사람 단위 합산이 아니다.
      그래서 전체 members 를 가벼운 컬럼만 한 번 읽어 사람별 합계를 만들어 둔다.
-     ⚠️ 지점 필터와 무관하게 **전 지점 합산**이다(판교 이가원 + 반포 이가원 = 한 사람). */
+     ⚠️ 지점 필터와 무관하게 **전 지점 합산**이다(판교 이가원 + 반포 이가원 = 한 사람).
+     ⚠️ 행을 그냥 더하지 않는다 — 같은 수강권 한 장이 이름 표식('○○○ 미수금')·결제 분할로
+        여러 행이 되고 그 행들이 같은 잔여횟수를 각자 든다. personUsedCount 가 등록건
+        (수강권명+수강권시작일)별로 접어서 센다. 그래서 수강권명·수강권시작일도 받아 온다. */
   const [personTotals, setPersonTotals] = useState<Map<string, number> | null>(null);
   const [personKeyOf, setPersonKeyOf] = useState<((r: Record<string, unknown>) => string) | null>(null);
   const [indexError, setIndexError] = useState(false);
@@ -72,14 +75,20 @@ export default function Members() {
       try {
         // dedup_key 도 받는다 — makePersonResolver 가 "동명이인 + 연락처 빈 행"을
         // 행 단위로 구분하는 기준이고, 표/요약과 같은 키를 얻으려면 양쪽에 있어야 한다.
-        const all = await fetchAllRows('dedup_key,이름,연락처,전체횟수,잔여횟수');
+        const all = await fetchAllRows(
+          'dedup_key,이름,연락처,전체횟수,잔여횟수,수강권명,수강권시작일',
+        );
         if (!alive) return;
         const keyOf = makePersonResolver(all);
-        const totals = new Map<string, number>();
+        const byPerson = new Map<string, MemberRecord[]>();
         for (const r of all) {
           const k = keyOf(r);
-          totals.set(k, (totals.get(k) ?? 0) + usedCount(r));
+          const list = byPerson.get(k);
+          if (list) list.push(r);
+          else byPerson.set(k, [r]);
         }
+        const totals = new Map<string, number>();
+        for (const [k, rows] of byPerson) totals.set(k, personUsedCount(rows));
         setPersonKeyOf(() => keyOf);
         setPersonTotals(totals);
         setIndexError(false);

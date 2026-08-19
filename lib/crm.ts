@@ -209,6 +209,12 @@ export function evidenceChips(m: Pick<CrmMessage, 'rule_id' | '근거'>): string
       return [
         `누적 ${n('누적횟수') ?? '?'}회`,
         `${n('마일스톤') ?? '?'}회차`,
+        // 회차는 사실 단언이라 예약 스냅샷의 실제 출석 수와 대조한 뒤 보낸다(verifyMilestone).
+        // 그 대조값을 같이 보여 준다 — 현장에서 "이 숫자 맞아?" 를 되짚을 수 있어야 한다.
+        e.관측출석 == null ? '' : `출석기록 ${n('관측출석')}회`,
+        e.행수 != null && e.등록건수 != null && Number(e.행수) !== Number(e.등록건수)
+          ? `중복행 ${Number(e.행수) - Number(e.등록건수)}건 접음`
+          : '',
         e.소급 ? '소급' : '',
       ].filter(Boolean);
     case 'expiring':

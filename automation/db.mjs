@@ -104,6 +104,8 @@ export async function fetchCrmInputs() {
     lastAttendance,
     sentHistory,
     historyDays: Number(depth.data?.관측일수 ?? 0),
+    // 마일스톤 교차검증용 — 이 날짜 이후 등록자는 전 이력이 예약 스냅샷 안에 있다
+    historyStart: String(depth.data?.이력시작일 ?? '').slice(0, 10),
   };
 }
 
