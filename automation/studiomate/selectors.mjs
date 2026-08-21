@@ -19,6 +19,11 @@
 //    (전체횟수는 등록 시점 확정값이고 주간 엑셀 재업로드로 교정된다)
 // ============================================================================
 
+/* ⚠️ 이 파일의 유일한 import — 타임아웃을 환경변수로 덮어쓰기 위해서다.
+   (config.mjs 가 dotenv 를 먼저 읽으므로, process.env 를 직접 보는 것보다 안전하다.
+    config.mjs 는 selectors 를 import 하지 않는다 — 순환 없음.) */
+import { env } from '../config.mjs';
+
 export const URLS = {
   /** 로그인 — ⚠️ 이메일이 아니라 **휴대폰 번호**로 로그인한다. */
   login: (slug) => `https://${slug}.studiomate.kr/login`,
@@ -137,9 +142,14 @@ export const SELECTORS = {
 export const STATUS_VALUES = ['예약', '예약대기', '출석', '결석', '노쇼', '취소'];
 
 export const TIMING = {
-  navTimeout: 30000,
+  /* 페이지 이동 한도. **기다리는 시간이 아니라 포기하는 시점**이다 — 빠른 날엔 비용이 0 이고,
+     짧게 잡으면 느린 날 하루치가 통째로 빈다.
+     🔥 2026-08-21 실측(로컬): 로그인 19.7초 · /schedule 25.4초 · 수업 상세 23.7초.
+        옛 한도 30초를 스치듯 넘겨 백필이 5개 사이트 전부 `Timeout 30000ms exceeded` 로 죽었다.
+     SCRAPE_NAV_TIMEOUT / SCRAPE_WAIT_TIMEOUT 로 덮어쓸 수 있다(config.mjs). */
+  navTimeout: env.SCRAPE_NAV_TIMEOUT,
   // 로그인 직후 앱이 초기 데이터를 여럿 부르느라 느릴 때가 있다(실측: 간헐적 15초 초과)
-  waitTimeout: 25000,
+  waitTimeout: env.SCRAPE_WAIT_TIMEOUT,
   /** 캘린더가 날짜를 다시 그릴 때까지의 여유 */
   daySettle: 700,
   /** "수업 0개"로 보일 때 한 번 더 기다리는 간격 — 0 을 휴무일로 오인하지 않기 위함 */

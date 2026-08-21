@@ -58,6 +58,14 @@ function safeBool(name, dflt) {
   }
 }
 
+/* 숫자 환경변수 — 못 읽으면 기본값. 0 이나 음수는 "무제한"이 되어 조용히 멈추므로 막는다. */
+function num(name, dflt) {
+  const raw = (process.env[name] ?? '').trim();
+  if (!raw) return dflt;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : dflt;
+}
+
 function list(name) {
   return (process.env[name] || '')
     .split(',')
@@ -106,6 +114,15 @@ export const env = {
   BACKFILL_FROM: process.env.BACKFILL_FROM || '',
   BACKFILL_TO: process.env.BACKFILL_TO || '',
   BACKFILL_DAYS: process.env.BACKFILL_DAYS || '',
+
+  /* 🔥 스크래핑 타임아웃 — 사이트가 느린 날이 있다.
+     2026-08-21 실측(로컬): 로그인 19.7초 · /schedule 이동 25.4초 · 수업 상세 이동 23.7초.
+     예전 한도 30초를 **스치듯 넘겨** 백필이 5개 사이트 전부 타임아웃으로 죽었다
+     (에러 메시지는 전부 `page.goto: Timeout 30000ms exceeded`).
+     한도는 "기다리는 시간"이 아니라 "포기하는 시점"이라, 넉넉히 잡아도 빠른 날엔 비용이 0 이다.
+     반대로 짧으면 느린 날 하루치가 통째로 빈다 — 그쪽이 훨씬 비싸다. */
+  SCRAPE_NAV_TIMEOUT: num('SCRAPE_NAV_TIMEOUT', 60000),
+  SCRAPE_WAIT_TIMEOUT: num('SCRAPE_WAIT_TIMEOUT', 40000),
 
   ONLY_BRANCHES: list('ONLY_BRANCHES'), // 쉼표구분 지점명; 비면 전체
   HEADLESS: safeBool('HEADLESS', true), // 라이브 셀렉터 작업 때 false 로 두면 창이 보인다

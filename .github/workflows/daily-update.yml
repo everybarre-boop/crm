@@ -66,8 +66,10 @@ on:
     - cron: '0 12 * * *'    # UTC 12:00 = KST 21:00 — 본 실행
     - cron: '30 13 * * *'   # UTC 13:30 = KST 22:30 — 예비(이미 끝났으면 guard 가 끊는다)
 
+# ⚠️ 백필(backfill.yml)과 **같은 그룹**을 쓴다 — 둘 다 같은 스튜디오메이트 계정으로
+#    로그인하므로 동시에 돌면 세션이 서로를 끊는다. 겹치면 뒤엣것이 큐에 들어가 기다린다.
 concurrency:
-  group: daily-update
+  group: studiomate-scrape
   cancel-in-progress: false
 
 jobs:

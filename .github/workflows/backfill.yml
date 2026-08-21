@@ -1,0 +1,81 @@
+# ============================================================================
+# 에블바레 — 과거 예약 백필 (수동 전용)
+# ----------------------------------------------------------------------------
+# automation/backfill.mjs 를 GitHub 러너에서 돌린다. 하는 일은 하나뿐이다:
+#   과거 날짜의 예약/출석을 스크랩해 **reservations 만** 채운다.
+#   ⛔️ apply_attendance 는 부르지 않는다 — 수업 상세의 "12회 남음"은 그 날짜의 값이 아니라
+#      회원의 **현재** 잔여횟수라, 과거 날짜로 members 를 갱신하면 같은 값을 수백 번 덮어쓴다.
+#
+# 왜 워크플로로도 두나 — 백필은 사이트를 수백 번 오가는 작업이라 **회선 상태를 크게 탄다.**
+#   2026-08-21 로컬 실행에서 SPA 번들 로딩이 60초를 넘겨(같은 시각 google.com 5.6초)
+#   5개 사이트가 전부 타임아웃으로 죽었다. 러너에서 돌리면 이 변수가 사라진다.
+#
+# ⚠️ schedule 을 달지 않는다. 백필은 1회성 복구 작업이고, 매일 도는 건 daily-update 다.
+# ⚠️ automation/out/*.json 에는 회원 실명이 들어간다 — artifact 로 업로드하지 말 것.
+#    같은 이유로 진행 파일(backfill-progress.local.json)도 러너에 남지 않는다.
+#    즉 **러너에서는 매번 처음부터** 훑는다(reservations 는 res_key upsert 라 중복은 안 쌓인다).
+#
+# 필요한 Secrets: ADMIN_EMAIL/ADMIN_PASSWORD, STUDIOMATE_PHONE/STUDIOMATE_PASSWORD
+#   (슬랙은 쓰지 않는다 — preflight 가 attendance 단계만 검사한다)
+# ============================================================================
+name: backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: '시작일 (YYYY-MM-DD)'
+        type: string
+        required: true
+      to:
+        description: '종료일 (YYYY-MM-DD) — 어제까지만 된다'
+        type: string
+        required: true
+      dry_run:
+        description: '저장 없이 건수만 확인'
+        type: boolean
+        default: true
+      only_branches:
+        description: '특정 지점만 (예: 광교). 비우면 전체'
+        type: string
+        default: ''
+
+concurrency:
+  group: studiomate-scrape # daily-update 와 같은 계정으로 로그인한다 — 겹치면 세션이 꼬인다
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120 # 사이트 5곳 × 날짜 수. 8일치가 대략 40~60분.
+    env:
+      TZ: Asia/Seoul
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+      ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+      STUDIOMATE_PHONE: ${{ secrets.STUDIOMATE_PHONE }}
+      STUDIOMATE_PASSWORD: ${{ secrets.STUDIOMATE_PASSWORD }}
+
+      DRY_RUN: ${{ inputs.dry_run }}
+      BACKFILL_FROM: ${{ inputs.from }}
+      BACKFILL_TO: ${{ inputs.to }}
+      ONLY_BRANCHES: ${{ inputs.only_branches }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ⚠️ 22 미만이면 안 된다 — supabase-js 가 전역 WebSocket 을 쓴다(daily-update.yml 참고).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Backfill reservations
+        run: node automation/backfill.mjs
