@@ -247,6 +247,9 @@ CSV 는 Excel 열람을 전제하므로 `=` `+` `-` `@` 로 시작하는 셀 값
   - **회차·횟수를 말하는 멘트는 사실 단언이다.** `verifyMilestone()` 이 `reservations` 의 실제
     출석 수와 대조해 모순이면 보류한다(전체횟수/시작일 결손 · 출석기록 > 누적 · 전 이력이
     관측 안인데 불일치). 배경과 표는 [docs/CRM-SLACK.md](docs/CRM-SLACK.md) 4-1 절.
+  - **교차검증은 두 기록이 살아 있을 때만 작동한다.** 주 1회 회원 엑셀 재업로드(관리자 직접) +
+    [sql/2026-08_verify_used_count.sql](sql/2026-08_verify_used_count.sql) 점검 + 빠진 날짜
+    백필이 한 묶음이다. 절차는 같은 문서의 "주간 교차검증 루틴".
 - **`used_count`(사용횟수) 컬럼:** `members.used_count` = `전체횟수 − 잔여횟수`인 STORED
   생성 컬럼(숫자 외 문자는 제거 후 계산). 생성 컬럼이라 **업로드 upsert 에 넣지 말 것**.
   클라이언트 계산이 필요하면 [lib/members.ts](lib/members.ts)의 `usedCount(rec)`를 쓴다.
