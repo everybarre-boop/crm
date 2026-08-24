@@ -4,7 +4,7 @@
 // 판정 로직은 여기 없다. 전부 shared/crm-rules.mjs(순수 함수)에 있다.
 // 이 파일은 "DB 에서 읽어와 넘기고, 결과를 저장하고, 슬랙에 뿌리는" 배선만 한다.
 // ============================================================================
-import { buildCrm } from '../shared/crm-rules.mjs';
+import { buildCrm, mergeRules } from '../shared/crm-rules.mjs';
 import { BRANCHES, env } from './config.mjs';
 import {
   fetchCrmInputs,
@@ -22,7 +22,12 @@ import { notifyOps, postBranchDigest, printPreview } from './slack.mjs';
    1) 규칙 평가 + 저장
    ---------------------------------------------------------------------- */
 export async function buildAndSaveCrm({ rosterRows, today, targetDate, dryRun }) {
-  const [rules, inputs] = await Promise.all([fetchRules(), fetchCrmInputs()]);
+  const [dbRules, inputs] = await Promise.all([fetchRules(), fetchCrmInputs()]);
+  /* ⚠️ DB(crm_rules)에 아직 없는 규칙을 코드 기본값으로 채운다.
+     postCrmToSlack 은 여기서 넘긴 rules 의 "슬랙발송"·"라벨"만 보므로, 병합하지 않으면
+     새로 추가한 규칙이 멘트는 만들어지는데 **슬랙에 안 나가고 라벨도 비는** 상태가 된다.
+     seed SQL(sql/2026-08_crm_rules_v2.sql)을 돌리면 DB 값이 이긴다. */
+  const rules = mergeRules(dbRules);
 
   const result = buildCrm({
     memberRows: inputs.memberRows,
