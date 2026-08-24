@@ -282,6 +282,13 @@ CRM 규칙 → 지점별 슬랙 발송. 피드백은 관리자 페이지에서 �
   스킵은 실행이 없어서 실패 알림조차 없다 — 그 조용한 구멍을 메우는 자리다.
 **운영 매뉴얼(슬랙 앱·Secrets·장애 대응·규칙 표)은 [docs/CRM-SLACK.md](docs/CRM-SLACK.md).**
 
+- 🔥 **진행 중인 다음 작업: [docs/NEXT-attendance-count.md](docs/NEXT-attendance-count.md)**
+  — 회차·마일스톤·휴면의 근거를 `전체횟수 − 잔여횟수`(= 차감된 횟수)에서 **실제 출석 기록**으로
+  옮긴다. 지금 값은 결석·횟수조정·만료소멸을 전부 "썼다"로 세어, 검증 가능한 회원 137명 중
+  **34%가 어긋난다**(양방향 — 회차를 높게도 낮게도 부른다). 지점별 차이는 없다(59~75%).
+  해법은 스튜디오메이트 회원 페이지(`/users/detail?id=`)의 **출석(N)** 을 기준선으로 읽고
+  이후는 `reservations` 출석 행으로 더하는 것. 배경·단계·검증법이 그 문서에 있다.
+
 - **선행 SQL(순서 고정):** [sql/2026-08_apply_attendance_v2.sql](sql/2026-08_apply_attendance_v2.sql)
   → [sql/2026-08_crm.sql](sql/2026-08_crm.sql) → [sql/2026-08_verify_crm.sql](sql/2026-08_verify_crm.sql).
   실행 전 `npm run db:backup members` · `npm run db:backup sales`.
