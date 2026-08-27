@@ -16,6 +16,7 @@ import {
   dedupeTicketRows,
   isTrial,
   isUsableTicket,
+  makeAttendanceCounter,
   makePersonResolver,
   normPersonName,
   personKey,
@@ -267,6 +268,16 @@ function makeSuppressor(sentHistory, targetDate) {
                      이 날짜 이후에 등록한 회원은 **전 이력이 관측 안에 있다** → 마일스톤
                      회차를 실제 출석 기록과 정확히 대조할 수 있다.
 
+     attendanceRows  crm_attendance 행 [{person_key, site, 기준일, 출석수}] —
+                     스튜디오메이트 회원 페이지가 **직접 센 출석 수**(사이트별).
+                     🔥 이게 있으면 마일스톤 회차의 근거가 `전체횟수 − 잔여횟수`(차감된 횟수)
+                        에서 **실제 출석 기록**으로 바뀐다. 비어 있으면 옛 경로로 폴백한다
+                        (도입 첫날·MOCK·테스트). docs/NEXT-attendance-count.md
+     recentReservations  기준일 이후 보정용 예약 행. 그날 읽은 회원에겐 필요 없고,
+                     읽기에 실패해 옛 값만 남은 회원을 메우는 데만 쓴다.
+                     ⚠️ 전량이 아니라 **min(기준일) 이후로 끊어** 넘길 것(하루 300~800행).
+     siteOfBranch    (지점) => 사이트 slug. 출석 수가 사이트별이라 보정도 사이트별로 한다.
+
    출력 { messages, dormant, stats, warnings }
    ---------------------------------------------------------------------- */
 export function buildCrm({
@@ -279,6 +290,9 @@ export function buildCrm({
   targetDate,
   historyDays = 0,
   historyStart = '',
+  attendanceRows = [],
+  recentReservations = [],
+  siteOfBranch = () => '',
 }) {
   const R = ruleMap(rules);
   const warnings = [];
@@ -318,6 +332,20 @@ export function buildCrm({
   }
   const 관측시작 = ymdNum(historyStart);
 
+  /* 🔥 회차의 근거 — 실제 출석 기록.
+     `전체횟수 − 잔여횟수` 는 결석·노쇼도 세고 횟수조정·만료소멸을 되짚지 못해, 검증 가능한
+     회원의 34% 에서 회차를 틀리게 부른다(양방향). attendanceRows 가 있으면 그쪽을 쓴다.
+     비어 있으면 옛 경로(usageAudit + verifyMilestone)로 폴백한다 — 도입 첫날과 테스트가
+     조용히 깨지지 않게 하기 위함이고, 실제 운영에서는 야간 잡이 매번 채운다. */
+  const 출석근거있음 = attendanceRows.length > 0;
+  const attendanceOf = makeAttendanceCounter({
+    rows: attendanceRows,
+    reservations: recentReservations,
+    siteOfBranch,
+    keyOf,
+    today,
+  });
+
   /* ── 예약자 정리 ────────────────────────────────────────────────────
      취소/노쇼/예약대기는 대상이 아니다. 같은 사람이 내일 여러 수업이면 시간 순으로 세어
      "그날 몇 번째 수업"을 만든다(마일스톤 회차 계산). */
@@ -331,6 +359,9 @@ export function buildCrm({
   let noMember = 0;
   const 보류 = []; // 교차검증에서 걸린 마일스톤 — 보내지 않고 경고로 남긴다
   let 결손 = 0; // 전체횟수가 없는데 언리밋도 아닌 신규 등록 — 멘트를 보내지 않는다
+  /* 회원 페이지를 못 읽어 출석 근거가 없는 예약자. 회차를 말할 수 없으니 마일스톤을 건너뛴다.
+     조용히 넘기면 "그날 마일스톤이 0건"이 정상처럼 보이므로 건수로 남긴다. */
+  let 근거없음 = 0;
 
   for (const r of roster) {
     const k = keyOf(r);
@@ -396,42 +427,66 @@ export function buildCrm({
       });
     };
 
-    // ── ① 마일스톤 (전 지점 합산 누적) ─────────────────────────────
-    if (nth === 1 && mem.length) {
+    /* ── ① 마일스톤 (전 사이트 합산) ─────────────────────────────────
+       근거는 **실제 출석 기록**이다(회원 페이지의 `출석(N)`). 없으면 옛 경로로 폴백.
+       mem.length 조건은 옛 경로에만 건다 — 새 경로는 members 없이도 회차를 안다. */
+    const 마일스톤가능 = nth === 1 && (출석근거있음 ? true : mem.length > 0);
+    if (마일스톤가능) {
       // 내일 여러 수업이어도 가장 이른 수업 하나에만 붙인다
       const p = R.get('milestone').파라미터 || {};
       const list = (p.마일스톤 || []).slice().sort((a, b) => a - b);
-      const 예정회차 = 누적횟수 + 1;
-      let hit = list.includes(예정회차) ? 예정회차 : null;
-      if (hit === null && p.소급허용) {
-        // 스크랩 누락으로 정확히 100 을 못 밟은 경우를 위한 소급 보정
-        const 한도 = toInt(p.소급한도) || 0;
-        const past = list.filter((mM) => mM < 예정회차 && 예정회차 - mM <= 한도);
-        const cand = past.length ? past[past.length - 1] : null;
-        if (cand !== null && !suppressed(k, 'milestone', String(cand), -1)) hit = cand;
-      }
-      if (hit !== null) {
-        const 관측출석 = 관측출석By.get(k) ?? 0;
-        const 검증 =
-          p.교차검증 === false
-            ? null
-            : verifyMilestone({ audit, 관측출석, 관측시작 });
-        if (검증) {
-          보류.push({ 이름: normPersonName(r.이름), 회차: hit, 사유: 검증, 누적횟수, 관측출석 });
-        } else {
-          /* ⛔️ 여기서 누적횟수를 예정회차로 덮지 말 것 — 템플릿의 "{{누적횟수}}회" 가
-             members 에 없는 수가 되어 강사 대조가 1 씩 어긋난다(위 템플릿 주석 참고). */
-          push('milestone', String(hit), { 마일스톤: hit, 예정회차 }, {
-            누적횟수: 누적횟수,
-            예정회차,
-            마일스톤: hit,
-            소급: hit !== 예정회차,
-            // 산출 근거를 남긴다 — 화면에서 "왜 이 숫자인가"를 되짚을 수 있어야 한다
-            관측출석,
-            등록건수: audit.등록건수,
-            행수: audit.행수,
-          });
+
+      /* 출석 근거 — att.출석 = 오늘까지 실제로 나온 횟수(전 사이트 합).
+         ⚠️ null 이면 그 회원의 회원 페이지를 못 읽은 것이다. **지어내지 말고 보류한다.** */
+      const att = 출석근거있음 ? attendanceOf(k) : null;
+      const 기준 = 출석근거있음 ? (att ? att.출석 : null) : 누적횟수;
+
+      if (기준 !== null) {
+        const 예정회차 = 기준 + 1;
+        let hit = list.includes(예정회차) ? 예정회차 : null;
+        if (hit === null && p.소급허용) {
+          // 스크랩 누락으로 정확히 100 을 못 밟은 경우를 위한 소급 보정
+          const 한도 = toInt(p.소급한도) || 0;
+          const past = list.filter((mM) => mM < 예정회차 && 예정회차 - mM <= 한도);
+          const cand = past.length ? past[past.length - 1] : null;
+          if (cand !== null && !suppressed(k, 'milestone', String(cand), -1)) hit = cand;
         }
+        if (hit !== null) {
+          const 관측출석 = 관측출석By.get(k) ?? 0;
+          /* 보류 판정.
+             · 새 경로: 오늘 읽은 값이어야 한다. 옛 값 + reservations 보정으로 메운 것은
+               스크랩이 하루라도 빠졌으면 낮게 나오므로, **사실 단언**을 하는 이 자리에서는
+               보내지 않는다(다음 실행에서 다시 읽으면 풀린다).
+             · 옛 경로: 예전 교차검증 그대로(members ↔ reservations 모순 확인). */
+          const 검증 = 출석근거있음
+            ? (att.확실 ? null : `출석 기록이 오늘 값이 아닙니다 (기준일 ${att.기준일})`)
+            : p.교차검증 === false
+              ? null
+              : verifyMilestone({ audit, 관측출석, 관측시작 });
+          if (검증) {
+            보류.push({ 이름: normPersonName(r.이름), 회차: hit, 사유: 검증, 누적횟수: 기준, 관측출석 });
+          } else {
+            /* ⛔️ 여기서 누적횟수를 예정회차로 덮지 말 것 — 템플릿의 "{{누적횟수}}회" 가
+               실재하지 않는 수가 되어 강사 대조가 1 씩 어긋난다(위 템플릿 주석 참고). */
+            push('milestone', String(hit), { 마일스톤: hit, 누적횟수: 기준, 예정회차 }, {
+              누적횟수: 기준,
+              예정회차,
+              마일스톤: hit,
+              소급: hit !== 예정회차,
+              // 산출 근거를 남긴다 — 화면에서 "왜 이 숫자인가"를 되짚을 수 있어야 한다
+              근거출처: 출석근거있음 ? '출석기록' : '차감횟수',
+              출석사이트수: att ? att.사이트수 : 0,
+              차감누적: 누적횟수, // 옛 값도 남겨 둔다 — 둘이 얼마나 벌어지는지 추적용
+              관측출석,
+              등록건수: audit.등록건수,
+              행수: audit.행수,
+            });
+          }
+        }
+      } else {
+        /* 출석 근거가 아예 없는 회원 — 회원 페이지를 못 읽었다.
+           회차를 말할 수 없으니 조용히 넘기지 말고 건수로 남긴다(실명 없이). */
+        근거없음++;
       }
     }
 
@@ -566,6 +621,12 @@ export function buildCrm({
         `. CRM 실행 화면에서 회원 데이터를 확인하세요.`,
     );
   }
+  if (근거없음) {
+    warnings.push(
+      `출석 기록이 없는 예약자 ${근거없음}건 — 회원 페이지를 못 읽어 마일스톤 회차를 ` +
+        `확정할 수 없었습니다(회차를 지어내지 않고 건너뜁니다).`,
+    );
+  }
   if (noPhone) warnings.push(`연락처를 못 채운 예약 ${noPhone}건 — 결제 전환 집계에서 빠집니다.`);
   if (noMember) warnings.push(`members 에서 못 찾은 예약자 ${noMember}건 — 누적 횟수 기반 규칙이 적용되지 않습니다.`);
 
@@ -626,6 +687,8 @@ export function buildCrm({
 
   const stats = { 예약: roster.length, 멘트: picked.length, 휴면: dormant.length };
   if (보류.length) stats.마일스톤보류 = 보류.length;
+  if (근거없음) stats.출석근거없음 = 근거없음;
+  stats.회차근거 = 출석근거있음 ? '출석기록' : '차감횟수';
   for (const m of picked) stats[m.rule_id] = (stats[m.rule_id] ?? 0) + 1;
 
   return { messages: picked, dormant, stats, warnings, 보류 };

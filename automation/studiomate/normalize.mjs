@@ -189,6 +189,13 @@ export function toReservationRecord(raw, { branch, date }) {
     잔여횟수: normCount(raw.잔여횟수),
     수강권시작일: normDate(raw.수강권시작일),
     수강권종료일: normDate(raw.수강권종료일),
+    /* 스튜디오메이트 회원 id — 회원 상세(`/users/detail?id=`)를 열어 **실제 출석 수**를
+       읽는 데 쓴다(docs/NEXT-attendance-count.md). 예약자 행의 컴포넌트 상태에서 나온다
+       (그 `a` 의 href 는 null 이다 — selectors.mjs 의 MEMBER_ID_VUE_PATH 참고).
+       ⚠️ `reservations` 컬럼이 아니다. save_reservations RPC 는 키를 명시적으로 골라 쓰므로
+          이 키는 무시된다(raw 에만 남는다). 여기 두는 이유는 예약행과 회원 id 가 **같은
+          한 번의 읽기**에서 나오기 때문이다 — 따로 들고 다니면 짝이 어긋난다. */
+    회원id: normText(raw.회원id),
   };
 }
 

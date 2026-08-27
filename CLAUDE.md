@@ -170,7 +170,7 @@ CSV 는 Excel 열람을 전제하므로 `=` `+` `-` `@` 로 시작하는 셀 값
   곧 DB 컬럼명이다(한글 컬럼). 회원 컬럼은 [lib/members.ts](lib/members.ts)의 `COLUMNS`,
   매출 컬럼은 [lib/sales.ts](lib/sales.ts)의 `SALES_COLUMNS`가 기준.
   그 밖에 `branch_costs`(지점 비용), `daily_runs`(자동화 실행 로그), 그리고 CRM 자동화용
-  `reservations`·`crm_rules`·`crm_messages`·`crm_dormant`·`crm_slack_posts` 가 있다
+  `reservations`·`crm_rules`·`crm_messages`·`crm_dormant`·`crm_slack_posts`·`crm_attendance` 가 있다
   (아래 "일간 CRM 자동화" 참고). Drizzle 짝은 [lib/db/schema.ts](lib/db/schema.ts).
 - **회원/매출 분리 업로드:** 업로드 화면은 회원 엑셀 **한 장**을 받아 컬럼만 나눈다 —
   회원 정보는 `members`, 결제 컬럼(`결제구분/결제금액/결제일시/결제방법/할부개월수`+식별정보)은
@@ -283,7 +283,10 @@ CSV 는 Excel 열람을 전제하므로 `=` `+` `-` `@` 로 시작하는 셀 값
 ## 일간 CRM 자동화 (2026-08)
 
 매일 21:00 KST GitHub Actions 실행(22:30 예비 1회) → 어제 출석 반영 → 내일 예약자 명단 →
-CRM 규칙 → 지점별 슬랙 발송. 피드백은 관리자 페이지에서 받는다.
+**내일 예약자의 실제 출석 수 읽기(`attcount`)** → CRM 규칙 → 지점별 슬랙 발송.
+피드백은 관리자 페이지에서 받는다.
+- 단계 순서는 고정이다 — `roster` 가 대상 명단을 만들고 `attcount` 가 그 사람들의 출석 수를
+  읽고 `crm` 이 그 값으로 회차를 판정한다. `attcount` 는 브라우저를 닫기 전에 끝나야 한다.
 - 🔥 **GitHub 의 `schedule` 은 기본 브랜치의 워크플로만 실행한다.** 기능 브랜치에만 cron 이
   있으면 영원히 안 돈다(수동 실행만 가능) — 실제로 2026-08-13 이후 5일간 야간 실행이 없었다.
 - 예비 실행(22:30)은 [automation/guard.mjs](automation/guard.mjs) 를 먼저 태운다. 그날 발송이
@@ -291,15 +294,31 @@ CRM 규칙 → 지점별 슬랙 발송. 피드백은 관리자 페이지에서 �
   스킵은 실행이 없어서 실패 알림조차 없다 — 그 조용한 구멍을 메우는 자리다.
 **운영 매뉴얼(슬랙 앱·Secrets·장애 대응·규칙 표)은 [docs/CRM-SLACK.md](docs/CRM-SLACK.md).**
 
-- 🔥 **진행 중인 다음 작업: [docs/NEXT-attendance-count.md](docs/NEXT-attendance-count.md)**
-  — 회차·마일스톤·휴면의 근거를 `전체횟수 − 잔여횟수`(= 차감된 횟수)에서 **실제 출석 기록**으로
-  옮긴다. 지금 값은 결석·횟수조정·만료소멸을 전부 "썼다"로 세어, 검증 가능한 회원 137명 중
-  **34%가 어긋난다**(양방향 — 회차를 높게도 낮게도 부른다). 지점별 차이는 없다(59~75%).
-  해법은 스튜디오메이트 회원 페이지(`/users/detail?id=`)의 **출석(N)** 을 기준선으로 읽고
-  이후는 `reservations` 출석 행으로 더하는 것. 배경·단계·검증법이 그 문서에 있다.
+- 🔥 **회차·마일스톤의 근거는 `전체횟수 − 잔여횟수` 가 아니라 실제 출석 기록이다**
+  (2026-08-27 적용. 배경·남은 작업: [docs/NEXT-attendance-count.md](docs/NEXT-attendance-count.md))
+  - `전체횟수 − 잔여횟수` 는 **차감된 횟수**다 — 결석·노쇼도 차감되고, 횟수 조정과 만료 소멸은
+    되짚을 수조차 없다. 검증 가능한 회원 137명 중 **34%가 어긋났고 양방향**이었다
+    (회차를 높게도 낮게도 부른다). 지점별 차이는 없다(59~75%).
+  - 근거는 스튜디오메이트 회원 페이지(`/users/detail?id=` → **이용내역** 탭)의 `출석(N)` 이다.
+    회원 전체·전 수강권 누적이고, `전체(N) = 예약+출석+결석+노쇼+취소` 로 정확히 쪼개진다.
+  - **매일 밤 내일 예약자 전원을 다시 읽는다**(회원당 ~1.6초 · 120명 ≈ 3분 → `attcount` 단계).
+    "기준선 한 번 + 이후 가산" 이 아니라 **최신 관측치 갱신**이라 드리프트가 없다.
+  - 공식은 [shared/crm-core.mjs](shared/crm-core.mjs) 의 `makeAttendanceCounter` 한 곳.
+    ⚠️ **사이트별 행을 더한다**(지점=사이트). 한쪽만 보면 회차가 절반이 된다.
+  - ⛔️ **근거가 없으면 회차를 지어내지 말 것.** 회원 페이지를 못 읽었으면 마일스톤을 보내지
+    않고 건수로 경고한다(`stats.출석근거없음`). 오늘 읽은 값이 아니어도 보류한다.
+  - `attendanceRows` 가 비면 옛 경로(차감 횟수)로 **폴백**한다 — 도입 첫날·MOCK·테스트용이다.
+    실제로 무엇을 썼는지는 `stats.회차근거` 와 멘트의 `근거.근거출처` 로 확인한다.
+  - 🔥 **회원 id 는 링크 href 로 못 얻는다.** `.members-list-item__name a` 의 href 는 **null**
+    이다(Vue 클릭 핸들러). 클릭하면 행 단위 왕복이 되어 사람이 조용히 사라진다.
+    → `li.__vue__.$props.member.id` 를 **예약자 목록을 읽는 같은 evaluate 한 번**에 같이 읽는다
+    ([selectors.mjs](automation/studiomate/selectors.mjs) 의 `MEMBER_ID_VUE_PATH`).
+    이건 API 직접 호출이 아니다(`x-sm-signature` 게이트를 흉내 내지 않는다는 결정과 무관).
+  - ⚠️ **이용내역 탭은 URL 로 못 연다**(`?tab=` 무시). 탭을 클릭해야 한다.
 
 - **선행 SQL(순서 고정):** [sql/2026-08_apply_attendance_v2.sql](sql/2026-08_apply_attendance_v2.sql)
-  → [sql/2026-08_crm.sql](sql/2026-08_crm.sql) → [sql/2026-08_verify_crm.sql](sql/2026-08_verify_crm.sql).
+  → [sql/2026-08_crm.sql](sql/2026-08_crm.sql) → [sql/2026-08_verify_crm.sql](sql/2026-08_verify_crm.sql)
+  → [sql/2026-08_attendance_truth.sql](sql/2026-08_attendance_truth.sql)(출석 수 테이블).
   실행 전 `npm run db:backup members` · `npm run db:backup sales`.
 - 🔥 **`apply_attendance` v1 은 재등록 다중행을 전부 덮어썼다.** 매칭이
   `이름+수강권명+연락처` 3열이었는데, 2026-08 `KEY_COLS` 개정 이후 **같은 사람의 같은 수강권

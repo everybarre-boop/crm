@@ -389,3 +389,90 @@ export function renderTemplate(tpl, vars) {
 export function slackEscape(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
+
+/* ----------------------------------------------------------------------
+   출석 횟수 — **차감된 횟수가 아니라 실제 출석 기록**
+   ----------------------------------------------------------------------
+   🔥 `전체횟수 − 잔여횟수`(= usageAudit/personUsedCount)는 "수강권에서 차감된 횟수"다.
+      결석·노쇼도 차감되고, 횟수 조정과 만료 소멸은 되짚을 수조차 없다. 그래서 그 값으로
+      "N번째 수업이에요"를 말하면 검증 가능한 회원의 34% 가 어긋난다(양방향).
+      → 회차·마일스톤·휴면은 이 함수를 쓴다. usedCount 계열은 **남은 횟수·만료 판단**에만 쓴다.
+      배경: docs/NEXT-attendance-count.md
+
+   근거는 스튜디오메이트 회원 페이지가 직접 센 `출석(N)`(crm_attendance)이다.
+   ⚠️ 그 값은 **사이트별**이다(지점=사이트). 청담+송파를 다니는 회원은 양쪽에 각각 있으므로
+      사이트별 행을 **더해서** 사람 값을 낸다. 한쪽만 보면 절반이 된다.
+
+   기준일 이후 보정 —
+     그날 읽은 행(기준일 == today)은 그 값이 곧 현재값이라 더할 게 없다.
+     읽기에 실패해 옛 행만 남았으면, **그 사이트의 지점들**에서 기준일 이후에 생긴
+     reservations 출석 행을 더해 메운다. 사이트를 구분해 더하지 않으면, 한 사이트만
+     오래된 회원에게 다른 사이트의 출석까지 얹혀 이중 계수가 된다.
+
+   ⛔️ 근거가 없으면 숫자를 지어내지 말 것. rows 가 없으면 null 을 돌려주고, 호출부는
+      회차 멘트를 **보내지 않는다**(교차검증이 막으려는 바로 그 사고다).
+
+   @param rows          crm_attendance 행 [{ person_key, site, 기준일, 출석수 }]
+   @param reservations  reservations 행 [{ person_key|이름·연락처, 지점, 예약일자, 예약상태 }]
+   @param siteOfBranch  (지점) => site slug. 지점→사이트 매핑(config.mjs 의 SITES).
+   @param keyOf         행 → person_key. 안 주면 personKey() 를 쓴다.
+   @param today         'YYYY-MM-DD' (KST)
+   @returns (person_key) => { 출석, 확실, 사이트수, 기준일 } | null
+   ---------------------------------------------------------------------- */
+export function makeAttendanceCounter({
+  rows = [],
+  reservations = [],
+  siteOfBranch = () => '',
+  keyOf = personKey,
+  today = '',
+} = {}) {
+  // person → site → { 기준일, 출석수 }   (같은 사이트가 두 번 오면 최신 기준일이 이긴다)
+  const byPerson = new Map();
+  for (const r of rows) {
+    const k = String(r.person_key ?? '');
+    if (!k) continue;
+    if (!byPerson.has(k)) byPerson.set(k, new Map());
+    const bySite = byPerson.get(k);
+    const site = String(r.site ?? '');
+    const prev = bySite.get(site);
+    const 기준일 = String(r.기준일 ?? '').slice(0, 10);
+    if (!prev || 기준일 > prev.기준일) bySite.set(site, { 기준일, 출석수: toInt(r.출석수) });
+  }
+  if (!byPerson.size) return () => null;
+
+  /* 기준일 이후 출석 행 — person + site 로 나눠 담는다.
+     같은 사람이 두 사이트를 다니면 각 사이트의 기준일이 다를 수 있으므로 반드시 나눠야 한다. */
+  const 출석행 = new Map(); // `${person}\u0000${site}` → ['YYYY-MM-DD', ...]
+  for (const v of reservations) {
+    if (String(v.예약상태 ?? '') !== '출석') continue;
+    const k = String(v.person_key ?? '') || keyOf(v);
+    if (!k) continue;
+    const site = siteOfBranch(v.지점) || '';
+    if (!site) continue; // 사이트를 모르면 더하지 않는다 — 지어내는 것보다 낫다
+    const kk = `${k}\u0000${site}`;
+    if (!출석행.has(kk)) 출석행.set(kk, []);
+    출석행.get(kk).push(String(v.예약일자 ?? '').slice(0, 10));
+  }
+
+  return (person) => {
+    const bySite = byPerson.get(person);
+    if (!bySite || !bySite.size) return null;
+    let 출석 = 0;
+    let 가장오래된 = '';
+    for (const [site, v] of bySite) {
+      출석 += v.출석수;
+      if (!가장오래된 || v.기준일 < 가장오래된) 가장오래된 = v.기준일;
+      if (today && v.기준일 >= today) continue; // 오늘 읽은 값 = 현재값. 더할 게 없다.
+      const dates = 출석행.get(`${person}\u0000${site}`) || [];
+      for (const d of dates) if (d > v.기준일) 출석++;
+    }
+    return {
+      출석,
+      /* 확실 = 전 사이트를 오늘 읽었다. 하나라도 옛 값이면 보정으로 메운 것이라,
+         회차처럼 **사실 단언**을 하는 자리에서는 이 플래그를 봐야 한다. */
+      확실: Boolean(today) && [...bySite.values()].every((v) => v.기준일 >= today),
+      사이트수: bySite.size,
+      기준일: 가장오래된,
+    };
+  };
+}

@@ -5,9 +5,11 @@
 // 이 파일은 "DB 에서 읽어와 넘기고, 결과를 저장하고, 슬랙에 뿌리는" 배선만 한다.
 // ============================================================================
 import { buildCrm, mergeRules } from '../shared/crm-rules.mjs';
-import { BRANCHES, env } from './config.mjs';
+import { BRANCHES, env, siteOfBranch } from './config.mjs';
 import {
+  fetchAttendanceRows,
   fetchCrmInputs,
+  fetchReservationsSince,
   fetchRules,
   getSlackPost,
   logRun,
@@ -22,7 +24,24 @@ import { notifyOps, postBranchDigest, printPreview } from './slack.mjs';
    1) 규칙 평가 + 저장
    ---------------------------------------------------------------------- */
 export async function buildAndSaveCrm({ rosterRows, today, targetDate, dryRun }) {
-  const [dbRules, inputs] = await Promise.all([fetchRules(), fetchCrmInputs()]);
+  const [dbRules, inputs, attendanceRows] = await Promise.all([
+    fetchRules(),
+    fetchCrmInputs(),
+    /* 회차·마일스톤의 근거 — 스튜디오메이트가 직접 센 출석 수(사이트별).
+       비어 있으면 buildCrm 이 옛 경로(차감 횟수)로 폴백한다. docs/NEXT-attendance-count.md */
+    fetchAttendanceRows(),
+  ]);
+
+  /* 기준일 이후 보정용 예약 행.
+     ⚠️ reservations 전량 스캔 금지(하루 300~800행) — 가장 오래된 기준일 이후로만 끊는다.
+        그날 읽은 회원에겐 더할 게 없으므로 대부분 빈 손이다. */
+  const 가장오래된기준일 = attendanceRows.reduce(
+    (min, r) => (!min || String(r.기준일) < min ? String(r.기준일).slice(0, 10) : min),
+    '',
+  );
+  const recentReservations = 가장오래된기준일
+    ? await fetchReservationsSince(가장오래된기준일)
+    : [];
   /* ⚠️ DB(crm_rules)에 아직 없는 규칙을 코드 기본값으로 채운다.
      postCrmToSlack 은 여기서 넘긴 rules 의 "슬랙발송"·"라벨"만 보므로, 병합하지 않으면
      새로 추가한 규칙이 멘트는 만들어지는데 **슬랙에 안 나가고 라벨도 비는** 상태가 된다.
@@ -39,6 +58,9 @@ export async function buildAndSaveCrm({ rosterRows, today, targetDate, dryRun })
     targetDate,
     historyDays: inputs.historyDays,
     historyStart: inputs.historyStart,
+    attendanceRows,
+    recentReservations,
+    siteOfBranch,
   });
 
   for (const w of result.warnings) console.warn(`  ⚠️ ${w}`);

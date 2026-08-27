@@ -7,6 +7,8 @@
 //   3 saveReservations D-1     → 예약 스냅샷의 상태를 '예약' → '출석/결석'으로 확정
 //   4 scrape D+1 (roster)      내일 예약자 명단 (목록만. 상세 모달 진입 X)
 //   5 saveReservations D+1
+//   5.5 attcount               내일 예약자의 **실제 출석 수**를 회원 페이지에서 읽어 저장
+//                              (회차·마일스톤의 근거. `전체횟수 − 잔여횟수`를 대체한다)
 //   6 buildCrm                 규칙 평가 → crm_messages + crm_dormant
 //   7 postSlack                지점별 채널에 통합 메시지 1건
 //   8 summary                  실패 집계 → 운영 채널 알림 → exit code
@@ -22,12 +24,12 @@
 //   DRY_RUN=false node automation/run.mjs
 // ============================================================================
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { BRANCHES, SITES, env, preflight } from './config.mjs';
+import { BRANCHES, SITES, env, preflight, siteOfBranch } from './config.mjs';
 import { applyAttendance } from './apply.mjs';
-import { saveReservations } from './db.mjs';
+import { fetchAttendanceFresh, saveAttendance, saveReservations } from './db.mjs';
 import { buildAndSaveCrm, postCrmToSlack } from './crm.mjs';
 import { notifyOps } from './slack.mjs';
-import { branchOf, dateKST } from '../shared/crm-core.mjs';
+import { branchOf, dateKST, personKey } from '../shared/crm-core.mjs';
 import { toAttendanceRecords, toReservationRecord } from './studiomate/normalize.mjs';
 
 const OUT_DIR = 'automation/out';
@@ -240,6 +242,82 @@ async function stepRoster(tomorrow, dryRun) {
 }
 
 /* ==========================================================================
+   출석 수 읽기 — 내일 예약자 각각의 회원 페이지에서 `출석(N)` 을 가져온다
+   --------------------------------------------------------------------------
+   🔥 왜 매일 다시 읽나 — 회원당 ~1.6초라 120명이 3분 남짓이다. 그 값이면 "기준선을 한 번
+      찍고 이후는 예약으로 더한다" 는 방식의 드리프트(스크랩 빠진 날·기준일 당일 저녁 수업·
+      기준선 노후)를 통째로 없애는 편이 낫다. 저장은 폴백·검증용으로만 남긴다.
+
+   ⚠️ 대상은 **내일 예약자**뿐이다. 전 회원(5,000명)을 읽으면 몇 시간이 걸린다.
+   ⚠️ 사이트별로 읽는다 — 회원 id 가 사이트마다 다르고, 출석 수도 사이트별이다.
+   ⚠️ 재실행(22:30 예비)에서는 오늘 이미 읽은 (사이트,회원id) 를 건너뛴다.
+   ========================================================================== */
+async function stepAttendanceCount(rosterRows, today, dryRun) {
+  if (env.MOCK_FILE) {
+    console.log('[attcount] MOCK 실행 — 건너뜁니다(회원 페이지를 열지 않습니다)');
+    return { read: 0, failed: 0 };
+  }
+
+  /* 사이트별 대상 — 같은 사람이 내일 여러 수업이어도 한 번만 읽는다.
+     예약대기·취소도 포함해서 읽는다: 회차를 아는 건 해롭지 않고, 다음날 대상이 될 수 있다. */
+  const bySite = new Map();
+  let noId = 0;
+  for (const r of rosterRows) {
+    const id = String(r.회원id ?? '').trim();
+    if (!id) { noId++; continue; }
+    const site = siteOfBranch(r.지점);
+    if (!site) { noId++; continue; }
+    if (!bySite.has(site)) bySite.set(site, new Map());
+    bySite.get(site).set(id, { 회원id: id, 이름: r.이름 || '', person_key: personKey(r) });
+  }
+  if (noId) {
+    console.warn(
+      `  ⚠️ 회원 id 를 못 얻은 예약 ${noId}건 — 그 회원은 마일스톤 회차를 확정할 수 없습니다 ` +
+        `(selectors.mjs 의 MEMBER_ID_VUE_PATH 확인).`,
+    );
+  }
+
+  const 이미 = dryRun ? new Set() : await fetchAttendanceFresh(today);
+  const { scrapeMembers } = await import('./studiomate.mjs');
+  const page = await getPage();
+  let read = 0;
+  let failed = 0;
+  let 건너뜀 = 0;
+
+  for (const [site, targets] of bySite) {
+    const todo = [...targets.values()].filter((t) => !이미.has(`${site}\u0000${t.회원id}`));
+    건너뜀 += targets.size - todo.length;
+    if (!todo.length) {
+      console.log(`[attcount] ${site}: ${targets.size}명 전부 오늘 이미 읽음 — 건너뜀`);
+      continue;
+    }
+    try {
+      await ensureLogin(page, site);
+      const t0 = Date.now();
+      const { rows, failures } = await scrapeMembers(page, site, todo);
+      const saved = await saveAttendance(
+        rows.map((r) => ({ ...r, 기준일: today, person_key: targets.get(r.회원id)?.person_key || '' })),
+        { dryRun },
+      );
+      read += rows.length;
+      failed += failures.length;
+      console.log(
+        `[attcount] ${site}: ${todo.length}명 중 ${rows.length}명 읽음` +
+          (dryRun ? ' (dry-run · 저장 안 함)' : ` / 저장 ${saved}건`) +
+          ` · ${((Date.now() - t0) / 1000).toFixed(0)}초` +
+          (failures.length ? `  ⚠️ 실패 ${failures.length}명` : ''),
+      );
+      /* 🔐 실패 로그에는 실명이 섞인다 — 콘솔(러너 로그)에만 남기고 슬랙엔 건수만 나간다. */
+      for (const f of failures.slice(0, 5)) console.warn(`     · ${f.이름}: ${f.error.slice(0, 120)}`);
+    } catch (err) {
+      fail('attcount', site, err);
+    }
+  }
+  if (건너뜀) console.log(`[attcount] 오늘 이미 읽어 건너뛴 회원 ${건너뜀}명 (재실행 멱등)`);
+  return { read, failed };
+}
+
+/* ==========================================================================
    main
    ========================================================================== */
 async function main() {
@@ -269,6 +347,11 @@ async function main() {
 
     if (steps.includes('roster')) rosterRows = await stepRoster(tomorrow, dryRun);
     else console.log('[skip] roster');
+
+    /* ⚠️ roster 뒤·crm 앞이어야 한다 — roster 가 대상 명단을 만들고 crm 이 그 값을 쓴다.
+       브라우저를 닫기 전에 끝내야 하므로 이 try 블록 안에 있다. */
+    if (steps.includes('attcount')) await stepAttendanceCount(rosterRows, today, dryRun);
+    else console.log('[skip] attcount');
   } finally {
     await closeBrowser();
   }

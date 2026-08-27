@@ -74,7 +74,10 @@ function list(name) {
 }
 
 // 실행 단계 — 부분 실행(디버깅·장애 후 재시도)용. 비면 전체.
-export const ALL_STEPS = ['attendance', 'roster', 'crm', 'slack'];
+/* attcount = 내일 예약자의 **실제 출석 수**를 회원 페이지에서 읽는 단계.
+   roster 뒤·crm 앞이어야 한다(roster 가 대상 명단을, crm 이 그 값을 쓴다).
+   docs/NEXT-attendance-count.md */
+export const ALL_STEPS = ['attendance', 'roster', 'attcount', 'crm', 'slack'];
 
 export const env = {
   // 공개값(anon 키는 비밀 아님) — NEXT_PUBLIC_* 이름으로 둬도 읽는다
@@ -162,6 +165,16 @@ export const SITES = [
   (s) => !env.ONLY_BRANCHES.length || s.branches.some((b) => env.ONLY_BRANCHES.includes(b)),
 );
 
+/* 지점 → 사이트 slug.
+   ⚠️ 출석 수(crm_attendance)는 **사이트별**이라, 보정할 때도 사이트를 맞춰야 한다.
+      청담·판교는 둘 다 everybarre 하나로 간다. 모르는 지점이면 '' — 호출부는 ''
+      를 "모른다"로 보고 **더하지 않는다**(지어내는 것보다 낫다). */
+const _SITE_OF_BRANCH = new Map();
+for (const s of SITES) for (const b of s.branches) _SITE_OF_BRANCH.set(b, s.slug);
+export function siteOfBranch(branch) {
+  return _SITE_OF_BRANCH.get(String(branch ?? '')) || '';
+}
+
 /* ----------------------------------------------------------------------
    preflight — 실행에 필요한 설정이 다 있는지 **시작 전에** 확인한다.
    중간에 죽으면 "출석은 반영됐는데 슬랙은 안 나간" 어중간한 상태가 남기 때문에,
@@ -178,7 +191,8 @@ export function preflight(steps = env.STEPS) {
     if (!env[k]) missing.push(k);
   }
 
-  const needsScrape = steps.includes('attendance') || steps.includes('roster');
+  const needsScrape =
+    steps.includes('attendance') || steps.includes('roster') || steps.includes('attcount');
   if (needsScrape && !env.MOCK_FILE) {
     if (!env.STUDIOMATE_PHONE) missing.push('STUDIOMATE_PHONE (휴대폰 번호로 로그인합니다)');
     if (!env.STUDIOMATE_PASSWORD) missing.push('STUDIOMATE_PASSWORD');

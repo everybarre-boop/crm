@@ -32,6 +32,13 @@ export const URLS = {
   /* 수업 상세. **여기는 쿼리가 먹는다** — 날짜(?date=)와 달리 id 로 직접 열 수 있다(실측).
      클릭 대신 이걸로 여는 이유는 scrape.mjs 2단계 주석 참고(클릭 직후엔 직전 수업이 보인다). */
   lectureDetail: (slug, id) => `https://${slug}.studiomate.kr/lecture/detail?id=${encodeURIComponent(id)}`,
+  /* 회원 상세. 여기도 `?id=` 가 먹는다(2026-08-27 실측).
+     ⚠️ 다만 **기본정보 탭으로 열린다.** 우리가 원하는 출석 수는 '이용내역' 탭에 있고,
+        그 탭은 URL 로 못 연다(?tab=history / ?tab=usage 둘 다 무시되고 URL 이 그대로다).
+        → member.historyTab 을 **클릭**해야 한다. */
+  userDetail: (slug, id) => `https://${slug}.studiomate.kr/users/detail?id=${encodeURIComponent(id)}`,
+  /** 이용회원 목록. 정렬 가능한 '최근출석일' 컬럼이 있다(휴면 규칙에서 쓸 수 있다). */
+  users: (slug) => `https://${slug}.studiomate.kr/users`,
 };
 
 export const SELECTORS = {
@@ -135,7 +142,55 @@ export const SELECTORS = {
        (Element UI 셀렉트라 선택값이 textContent 에 안 나온다) → `.value` 로 읽는다. */
     예약상태: '.members-list-item__select input',
   },
+
+  /* ── 회원 상세 (`/users/detail?id=`) ───────────────────────────────────
+     2026-08-27 라이브 확인. 여기서 읽는 값은 **스튜디오메이트가 직접 센 출석 수**로,
+     `전체횟수 − 잔여횟수`(차감된 횟수)를 대체하는 회차·마일스톤의 근거다.
+     배경: docs/NEXT-attendance-count.md
+
+     실측으로 확인한 성질 — 이 셋이 설계의 전제다:
+       ① 카운트는 **회원 전체·전 수강권 누적**이다(수강권별 집계가 아니다).
+          조유림(id 940607, 2021-10 등록): 전체 719 = 출석 528 + 취소 191.
+          '이전 수강권 보기' 버튼을 눌러도 값이 그대로다.
+       ② `전체(N)` = 예약+출석+결석+노쇼+취소 로 정확히 쪼개진다(실측 2건에서 합 일치).
+       ③ 이용내역 탭은 **클릭으로만** 열린다(URL 로 못 연다 — URLS.userDetail 주석 참고).
+
+     ⚠️ 이 값은 **사이트별**이다. 지점=사이트라 청담+송파를 다니는 회원은 양쪽에 각각
+        출석 수가 있다. 한쪽만 읽으면 절반이 된다 → 사이트별로 따로 저장하고 합산한다. */
+  member: {
+    /* 상단 탭바(기본정보 / 이용내역 / 포인트 내역 / 결제 내역).
+       ⚠️ el-tabs 가 아니라 그냥 `ul > div > li` 다 — role="tab" 도 없다. */
+    detailTabs: 'ul.member-detail__header-tabs li',
+    /** 위 li 중에서 이 텍스트인 것을 클릭한다 */
+    historyTabText: '이용내역',
+    /* 이용내역 탭 안의 카운트 탭 — `전체(719)` `예약(0)` `출석(528)` … 형태.
+       숫자는 텍스트에서 파싱한다(별도 요소가 없다). */
+    historyCounts: 'ul.member-history__header__tabs li',
+    /* 🔥 SPA stale 방지의 핵심 — **이 회원이 맞는지** 확인할 요소.
+       수업 상세에서 겪은 그대로다: URL 을 먼저 바꾸고 내용은 API 응답 뒤에 그리므로,
+       "요소가 있다"로 판정하면 **직전 회원의 출석 수를 읽는다.**
+       존재가 아니라 이름이 일치하는지로 판정할 것. */
+    identityName: '.member-detail__header h3',
+  },
 };
+
+/* 🔥 예약자 행에서 회원 id 를 얻는 법 — **href 가 아니다.**
+   docs/NEXT-attendance-count.md 와 예전 메모는 `.members-list-item__name a` 의 href 에서
+   얻는다고 적었는데, 2026-08-27 실측 결과 그 `a` 의 **href 는 null** 이다(Vue 클릭 핸들러).
+   클릭하면 같은 탭에서 /users/detail?id= 로 이동해 버리므로, 행마다 클릭하면
+   "행 단위 왕복"이 되어 목록이 다시 그려지고 사람이 사라진다(그 사고의 재발).
+
+   대신 렌더된 행의 **컴포넌트 상태**를 읽는다 — `li.__vue__.$props.member.id`.
+   예약자 목록을 통째로 읽는 **같은 evaluate 한 번**에 같이 읽히므로 왕복이 0 이고,
+   네트워크 요청도 추가되지 않는다.
+
+   ⚠️ 이건 API 호출이 아니다. api.studiomate.kr 직접 호출은 `x-sm-signature` 게이트가
+      있고 **쓰지 않기로 한 결정**이다(memory: studiomate-scraping). 여기서는 앱이 이미
+      그려 놓은 화면의 상태를 읽을 뿐이라 그 결정과 충돌하지 않는다.
+
+   검증(2026-08-27): 첫 행의 member.id = 3205433 이고, 그 이름을 클릭했을 때 이동한 주소가
+   /users/detail?id=3205433 으로 일치했다. */
+export const MEMBER_ID_VUE_PATH = ['member', 'id'];
 
 /* 예약상태 어휘 — 정규화 **후**의 값. 화면 원문은 "예약 확정", "예약 대기 (1)" 처럼
    띄어쓰기·순번이 붙어 나오므로 normalize.mjs 의 normStatus 가 여기로 접는다. */
@@ -163,6 +218,10 @@ export const TIMING = {
   emptyBudget: 20000,
   /** 상세 페이지 렌더 여유 */
   detailSettle: 400,
+  /* 회원 상세 — 탭을 클릭한 뒤 카운트가 채워질 때까지의 여유.
+     ⚠️ 이 값에 의존해 "다 그려졌다"고 판정하지 말 것. scrape.mjs 는 이름 일치 + 카운트
+        파싱 성공을 **둘 다** 확인하고, 안 되면 실패시킨다(빈 화면을 0회로 통과시키지 않기 위함). */
+  memberSettle: 800,
 };
 
 /** 셀렉터가 채워졌는지 — run.mjs 가 친절한 에러를 내기 위해 쓴다. */

@@ -19,6 +19,7 @@ export const T = {
   posts: 'crm_slack_posts',
   runs: 'daily_runs',
   lastAttendance: 'crm_last_attendance',
+  attendance: 'crm_attendance',
   historyDepth: 'crm_history_depth',
 };
 
@@ -269,4 +270,90 @@ export async function logRun({
     created_by: env.ADMIN_EMAIL || null,
   });
   if (error) throw new Error(`daily_runs 기록 실패: ${error.message}`);
+}
+
+/* ==========================================================================
+   출석 수 — 스튜디오메이트 회원 페이지가 직접 센 값 (회차·마일스톤의 근거)
+   --------------------------------------------------------------------------
+   `전체횟수 − 잔여횟수`(차감된 횟수)를 대체한다. 배경: docs/NEXT-attendance-count.md
+   ⚠️ **사이트별**이다(지점=사이트). 사람 값은 사이트별 행을 더해서 낸다.
+   ========================================================================== */
+
+/** 오늘 이미 읽은 (site, 회원id) — 재실행 때 다시 읽지 않기 위한 것.
+    21:00 실패 후 22:30 재실행이 120명을 또 읽으면 그만큼 늦어진다(멱등성 + 비용). */
+export async function fetchAttendanceFresh(today) {
+  const sb = await getAdminClient();
+  const { data, error } = await sb
+    .from(T.attendance)
+    .select('site,회원id')
+    .eq('기준일', today);
+  if (error) throw new Error(`crm_attendance 조회 실패: ${error.message}`);
+  return new Set((data || []).map((r) => `${r.site}\u0000${r.회원id}`));
+}
+
+/** 규칙 평가에 넘길 행 전체. 사람×사이트 1행이라 members 보다 훨씬 작다. */
+export async function fetchAttendanceRows() {
+  const sb = await getAdminClient();
+  return fetchAll(sb, T.attendance, 'person_key,site,회원id,이름,기준일,출석수,결석수', {
+    orderBy: ['id'],
+  });
+}
+
+/* 기준일 이후 보정용 예약 행.
+   ⚠️ reservations 는 하루 300~800행씩 쌓인다 — 전량 스캔 금지(CLAUDE.md).
+      반드시 from 이후로 끊는다. from 이 없으면 아예 읽지 않는다. */
+export async function fetchReservationsSince(from) {
+  if (!from) return [];
+  const sb = await getAdminClient();
+  const out = [];
+  let start = 0;
+  while (start < 60000) {
+    const { data, error } = await sb
+      .from(T.reservations)
+      .select('person_key,이름,연락처,지점,예약일자,예약상태')
+      .gte('예약일자', from)
+      .order('id', { ascending: true })
+      .range(start, start + PAGE - 1);
+    if (error) throw new Error(`reservations 조회 실패: ${error.message}`);
+    if (!data || !data.length) break;
+    out.push(...data);
+    if (data.length < PAGE) break;
+    start += PAGE;
+  }
+  return out;
+}
+
+/**
+ * 읽어 온 출석 수를 저장한다. (site, 회원id) 하나당 1행 — 매일 최신값으로 덮는다.
+ * ⚠️ person_key·이름도 같이 덮는다: 회원이 개명하거나 연락처를 바꾸면 우리 쪽 조인 키가
+ *    바뀌는데, 스튜디오메이트 회원 id 는 그대로다. id 를 기준으로 최신 이름을 따라간다.
+ */
+export async function saveAttendance(rows, { dryRun }) {
+  if (dryRun || !rows.length) return 0;
+  const sb = await getAdminClient();
+  const now = new Date().toISOString();
+  const payload = rows.map((r) => ({
+    site: r.site,
+    회원id: String(r.회원id),
+    person_key: r.person_key || '',
+    이름: r.이름 || '',
+    기준일: r.기준일,
+    출석수: r.출석 ?? 0,
+    결석수: r.결석 ?? 0,
+    노쇼수: r.노쇼 ?? 0,
+    취소수: r.취소 ?? 0,
+    예약수: r.예약 ?? 0,
+    전체수: r.전체 ?? 0,
+    읽은시각: now,
+  }));
+  let n = 0;
+  for (const part of chunk(payload)) {
+    const { data, error } = await sb
+      .from(T.attendance)
+      .upsert(part, { onConflict: 'site,회원id' })
+      .select('id');
+    if (error) throw new Error(`crm_attendance 저장 실패: ${error.message}`);
+    n += (data || []).length;
+  }
+  return n;
 }

@@ -908,3 +908,103 @@ test('마일스톤: 교차검증=false 면 members 값만으로 보낸다 (탈�
   });
   assert.ok(one(r, 'milestone'));
 });
+
+/* ==========================================================================
+   ⑩ 회차의 근거를 "차감된 횟수" → "실제 출석 기록" 으로 옮긴 자리
+      (docs/NEXT-attendance-count.md)
+
+   왜 이 테스트들이 있나 — `전체횟수 − 잔여횟수` 는 결석·노쇼도 세고, 횟수 조정과
+   만료 소멸은 되짚을 수조차 없다. 검증 가능한 회원 137명 중 34% 가 어긋났고 **양방향**
+   이었다(회차를 높게도, 낮게도 부른다). 그래서 attendanceRows(회원 페이지의 `출석(N)`)가
+   있으면 그쪽을 근거로 쓴다. 아래가 그 계약이다.
+   ========================================================================== */
+const PK = personKey({ 이름: '홍길동', 연락처: '010-1111-2222' });
+const 사이트 = (지점) => ({ 청담: 'everybarre', 판교: 'everybarre', 광교: 'everybarre-gwanggyo', 송파: 'everybarre-songpa' }[지점] || '');
+const att = (o = {}) => ({ person_key: PK, site: 'everybarre-gwanggyo', 기준일: TODAY, 출석수: 9, ...o });
+
+test('출석근거: 결석은 회차에 안 들어간다 (차감 횟수는 결석도 센다)', () => {
+  /* members 는 전체 20 · 잔여 8 → 차감 12. 옛 경로였다면 "13회차".
+     실제 출석은 9회뿐이므로 내일이 10회차다 — 그게 맞는 값이다. */
+  const r = run({
+    memberRows: [mem({ 전체횟수: '20', 잔여횟수: '8' })],
+    rosterRows: [resv()],
+    attendanceRows: [att({ 출석수: 9 })],
+    siteOfBranch: 사이트,
+  });
+  const m = one(r, 'milestone');
+  assert.ok(m, '출석 9회 + 내일 = 10회차인데 마일스톤이 안 잡혔다');
+  assert.equal(m.규칙키, '10');
+  assert.equal(m.근거.누적횟수, 9);
+  assert.equal(m.근거.근거출처, '출석기록');
+  assert.equal(m.근거.차감누적, 12, '옛 값도 근거에 남겨 둔다(둘이 벌어지는 정도 추적용)');
+  assert.match(m.멘트, /지금까지 9회/);
+});
+
+test('출석근거: 1 모자라면 발동하지 않는다 (경계)', () => {
+  const r = run({
+    memberRows: [mem({ 전체횟수: '20', 잔여횟수: '8' })], // 차감 12 — 옛 경로면 켜졌을 값
+    rosterRows: [resv()],
+    attendanceRows: [att({ 출석수: 8 })], // 내일이 9회차
+    siteOfBranch: 사이트,
+  });
+  assert.equal(one(r, 'milestone'), undefined);
+});
+
+test('출석근거: 두 사이트 출석 수가 합산된다 (한쪽만 보면 절반이 된다)', () => {
+  /* 김단하 사례 — 청담(everybarre)과 송파(everybarre-songpa)를 같이 다닌다.
+     지점이 아니라 **사이트**가 단위라, 한쪽만 읽으면 회차를 절반으로 부른다. */
+  const r = run({
+    memberRows: [mem()],
+    rosterRows: [resv()],
+    attendanceRows: [
+      att({ site: 'everybarre', 출석수: 36 }),
+      att({ site: 'everybarre-songpa', 출석수: 13 }),
+    ],
+    siteOfBranch: 사이트,
+  });
+  const m = one(r, 'milestone');
+  assert.ok(m, '36+13=49 → 내일 50회차인데 안 잡혔다');
+  assert.equal(m.규칙키, '50');
+  assert.equal(m.근거.출석사이트수, 2);
+});
+
+test('출석근거: 근거가 없는 회원은 마일스톤을 보내지 않는다 (지어내지 않는다)', () => {
+  /* 회원 페이지를 못 읽은 사람. 차감 횟수로는 "10회차"지만, 그 값이 틀리다는 게
+     이 작업의 전제다 — 그러니 지어내지 말고 건너뛰고, 건수로 경고한다. */
+  const r = run({
+    memberRows: [mem({ 전체횟수: '20', 잔여횟수: '11' })], // 차감 9 → 옛 경로면 10회차
+    rosterRows: [resv()],
+    attendanceRows: [att({ person_key: '다른사람\u001f01099998888' })],
+    siteOfBranch: 사이트,
+  });
+  assert.equal(one(r, 'milestone'), undefined);
+  assert.equal(r.stats.출석근거없음, 1);
+  assert.ok(r.warnings.some((w) => w.includes('출석 기록이 없는 예약자')));
+  assert.ok(!r.warnings.some((w) => /홍길동/.test(w)), '경고에 실명이 들어가면 안 된다');
+});
+
+test('출석근거: 오늘 값이 아니면 보류한다 (스크랩이 빠지면 낮게 나온다)', () => {
+  const r = run({
+    memberRows: [mem()],
+    rosterRows: [resv()],
+    attendanceRows: [att({ 기준일: '2026-08-03', 출석수: 8 })],
+    recentReservations: [
+      { person_key: PK, 지점: '광교', 예약일자: '2026-08-04', 예약상태: '출석' },
+    ],
+    siteOfBranch: 사이트,
+  });
+  assert.equal(one(r, 'milestone'), undefined, '보정으로 9가 되어도 오늘 값이 아니면 보내지 않는다');
+  assert.equal(r.stats.마일스톤보류, 1);
+  assert.ok(r.warnings.some((w) => w.includes('마일스톤') && w.includes('보류')));
+});
+
+test('출석근거: attendanceRows 가 비면 옛 경로로 폴백한다 (도입 첫날·MOCK)', () => {
+  const r = run({
+    memberRows: [mem({ 전체횟수: '20', 잔여횟수: '11' })], // 차감 9 → 10회차
+    rosterRows: [resv()],
+  });
+  const m = one(r, 'milestone');
+  assert.ok(m, '폴백 경로가 끊기면 도입 첫날 마일스톤이 통째로 사라진다');
+  assert.equal(m.근거.근거출처, '차감횟수');
+  assert.equal(r.stats.회차근거, '차감횟수');
+});

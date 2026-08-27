@@ -11,7 +11,7 @@
 //    회원 상세 모달에 따로 들어가지 않는다(클릭 수가 수백 회 줄어든다).
 //    전체횟수만 화면에 없어서 빈 값으로 두고, apply_attendance v2 가 DB 값을 유지한다.
 // ============================================================================
-import { SELECTORS, TIMING, URLS, selectorsReady } from './selectors.mjs';
+import { MEMBER_ID_VUE_PATH, SELECTORS, TIMING, URLS, selectorsReady } from './selectors.mjs';
 import {
   WAITLIST,
   normDate,
@@ -22,7 +22,7 @@ import {
   parseTicketLine,
   toReservationRecord,
 } from './normalize.mjs';
-import { addDays, daysBetween } from '../../shared/crm-core.mjs';
+import { addDays, daysBetween, normPersonName } from '../../shared/crm-core.mjs';
 
 /* 스크랩이 채워야 하는 필드 — 전 행이 비어 있으면 "셀렉터 미설정"으로 경고한다. */
 const WANTED = ['수업시간', '수업명', '이름', '연락처', '수강권명', '예약상태', '잔여횟수'];
@@ -411,13 +411,23 @@ async function readLecture(page, fallbackDate) {
      ⚠️ 인원수 검증은 **개수만** 보므로 이 오류를 못 잡는다. 원자적으로 읽는 게 유일한 방어다.
      (덤으로 왕복이 사라져 훨씬 빠르다.) */
   const raw = await page.evaluate(
-    ({ listSel, nameSel, ticketSel, statusSel }) => {
+    ({ listSel, nameSel, ticketSel, statusSel, idPath }) => {
       const txt = (el) => (el ? el.textContent || '' : '');
+      /* 회원 id 는 href 가 아니라 컴포넌트 상태에서 나온다 — selectors.mjs 의
+         MEMBER_ID_VUE_PATH 주석 참고(그 `a` 의 href 는 null 이다).
+         못 읽어도 여기서 던지지 않는다: 예약 수집(핵심)까지 같이 죽으면 안 된다.
+         비었을 때의 처리는 호출부가 건수로 경고한다. */
+      const memberId = (li) => {
+        let v = li.__vue__ && li.__vue__.$props;
+        for (const k of idPath) { if (v == null) return null; v = v[k]; }
+        return v == null ? null : String(v);
+      };
       return [...document.querySelectorAll(listSel)].map((li) => ({
         회원: txt(li.querySelector(nameSel)),
         수강권: txt(li.querySelector(ticketSel)),
         // Element UI 셀렉트 — 선택값은 textContent 가 아니라 input.value 에 있다
         예약상태: li.querySelector(statusSel)?.value ?? '',
+        회원id: memberId(li),
       }));
     },
     {
@@ -425,6 +435,7 @@ async function readLecture(page, fallbackDate) {
       nameSel: SELECTORS.booking.회원,
       ticketSel: SELECTORS.booking.수강권,
       statusSel: SELECTORS.booking.예약상태,
+      idPath: MEMBER_ID_VUE_PATH,
     },
   );
 
@@ -444,6 +455,7 @@ async function readLecture(page, fallbackDate) {
       이름,
       연락처,
       예약상태,
+      회원id: r.회원id || '',
       ...ticket,
     });
   }
@@ -643,4 +655,140 @@ export async function scrapeBranch(page, site, { date, navigate = true }) {
   /* 재확인 = "0개로 보여서 화면을 새로 로드해 다시 셌다". 결과가 0이든 아니든 남긴다 —
      휴무일 판정이 **한 번 읽고 내린 것인지** 구분할 수 있어야 한다. */
   return { rows, 수업수, 누락: 누락 > 0 ? 누락 : 0, 대기, missing, 재확인 };
+}
+
+/* ==========================================================================
+   회원 상세 — 스튜디오메이트가 직접 센 출석 수를 읽는다
+   --------------------------------------------------------------------------
+   왜 이걸 읽나 — 지금까지 회차·마일스톤의 근거였던 `전체횟수 − 잔여횟수` 는
+   **"수강권에서 차감된 횟수"** 이지 출석 횟수가 아니다. 결석·노쇼도 차감되고,
+   횟수 조정과 만료 소멸은 되짚을 수조차 없다(검증 가능한 137명 중 34% 불일치).
+   회원 페이지의 `출석(N)` 은 스튜디오메이트가 예약 이력을 직접 센 값이라 그 넷을 전부 피한다.
+   배경·설계: docs/NEXT-attendance-count.md
+
+   ⚠️ 이 값은 **사이트별**이다(지점=사이트). 청담+송파를 다니는 회원은 양쪽에 각각 있으므로
+      사이트별로 저장하고 합산한다 — 한쪽만 읽으면 절반이 된다.
+
+   ⚠️ 실패 처리 원칙(CLAUDE.md) — **검증할 수 없으면 통과가 아니라 실패다.**
+      화면이 아직 안 그려졌을 때 빈 값을 "출석 0회"로 통과시키면, 다니던 회원이 하루아침에
+      0회가 되어 마일스톤이 통째로 어긋난다. 그래서 아래 셋을 **모두** 확인하고, 하나라도
+      안 되면 그 회원은 실패로 남긴다(전체를 죽이지는 않는다 — 호출부가 건수로 판단).
+        ① 화면의 이름이 우리가 찾는 회원과 같은가        (엉뚱한 회원을 읽지 않기)
+        ② 카운트 탭이 파싱되는가                          (빈 화면을 0으로 읽지 않기)
+        ③ 전체(N) == 예약+출석+결석+노쇼+취소            (화면 구조가 바뀌지 않았나)
+   ========================================================================== */
+
+/** 이용내역 탭의 `출석(528)` 류를 파싱한다. 못 읽으면 null(=실패). */
+async function readHistoryCounts(page) {
+  return page.evaluate((sel) => {
+    const li = [...document.querySelectorAll(sel)];
+    if (!li.length) return null;
+    const out = {};
+    for (const e of li) {
+      const m = (e.textContent || '').trim().match(/^(\S+?)\s*\(\s*(\d+)\s*\)$/);
+      if (m) out[m[1]] = Number(m[2]);
+    }
+    return Object.keys(out).length ? out : null;
+  }, SELECTORS.member.historyCounts);
+}
+
+/**
+ * 회원 한 명의 출석 수를 읽는다.
+ * @returns {{전체:number,예약:number,출석:number,결석:number,노쇼:number,취소:number,이름:string}}
+ * @throws  위 ①②③ 중 하나라도 확인이 안 되면
+ */
+export async function scrapeMemberAttendance(page, slug, 회원id, { 이름 = '' } = {}) {
+  await page.goto(URLS.userDetail(slug, 회원id), { waitUntil: 'domcontentloaded' });
+
+  // ① 이름이 채워질 때까지 기다린다(요소 존재만으로는 부족 — 내용은 응답 뒤에 그려진다)
+  const nameSel = SELECTORS.member.identityName;
+  await page.waitForFunction(
+    (sel) => (document.querySelector(sel)?.textContent || '').trim().length > 0,
+    nameSel,
+    { timeout: TIMING.waitTimeout },
+  );
+  const 화면이름 = ((await text(page, nameSel)) || '').trim();
+  if (이름 && normPersonName(화면이름) !== normPersonName(이름)) {
+    throw new Error(
+      `회원 페이지가 다른 사람입니다 — 찾는 사람 "${이름}", 화면 "${화면이름}" (id=${회원id}). ` +
+        `그대로 읽으면 남의 출석 수를 그 사람 것으로 저장한다.`,
+    );
+  }
+
+  // ② 이용내역 탭은 URL 로 못 연다 — 클릭해야 한다
+  const clicked = await page.evaluate(
+    ({ tabsSel, label }) => {
+      const el = [...document.querySelectorAll(tabsSel)].find(
+        (e) => (e.textContent || '').trim() === label,
+      );
+      if (!el) return false;
+      el.click();
+      return true;
+    },
+    { tabsSel: SELECTORS.member.detailTabs, label: SELECTORS.member.historyTabText },
+  );
+  if (!clicked) {
+    throw new Error(
+      `'${SELECTORS.member.historyTabText}' 탭을 못 찾았습니다 (id=${회원id}). ` +
+        `selectors.mjs 의 member.detailTabs 를 확인하세요.`,
+    );
+  }
+
+  // 카운트가 채워질 때까지 기다린다. 시간이 아니라 **값**으로 판정한다.
+  await page.waitForTimeout(TIMING.memberSettle);
+  const deadline = Date.now() + TIMING.waitTimeout;
+  let c = await readHistoryCounts(page);
+  while ((!c || c.전체 == null) && Date.now() < deadline) {
+    await page.waitForTimeout(200);
+    c = await readHistoryCounts(page);
+  }
+  if (!c || c.전체 == null || c.출석 == null) {
+    throw new Error(
+      `이용내역 카운트를 못 읽었습니다 (id=${회원id} ${화면이름}). ` +
+        `읽은 값: ${JSON.stringify(c)}. 빈 화면을 0회로 통과시키지 않기 위해 실패로 처리합니다.`,
+    );
+  }
+
+  // ③ 전체 = 나머지 합. 어긋나면 화면 구조가 바뀐 것이므로 값을 믿으면 안 된다.
+  const parts = ['예약', '출석', '결석', '노쇼', '취소'].map((k) => c[k] ?? 0);
+  const sum = parts.reduce((a, b) => a + b, 0);
+  if (c.전체 !== sum) {
+    throw new Error(
+      `이용내역 카운트가 안 맞습니다 — 전체 ${c.전체} ≠ 예약+출석+결석+노쇼+취소 ${sum} ` +
+        `(id=${회원id} ${화면이름}). selectors.mjs 의 member.historyCounts 를 확인하세요.`,
+    );
+  }
+
+  return {
+    이름: 화면이름,
+    전체: c.전체,
+    예약: c.예약 ?? 0,
+    출석: c.출석 ?? 0,
+    결석: c.결석 ?? 0,
+    노쇼: c.노쇼 ?? 0,
+    취소: c.취소 ?? 0,
+  };
+}
+
+/**
+ * 여러 명을 순차로 읽는다. 한 명이 실패해도 나머지는 계속한다
+ * (한 사람 때문에 그날 회차 근거가 통째로 비면 안 된다).
+ * @param targets [{ 회원id, 이름 }]
+ * @returns {{ rows: [], failures: [{회원id,이름,error}] }}
+ */
+export async function scrapeMembers(page, slug, targets, { onProgress } = {}) {
+  const rows = [];
+  const failures = [];
+  let i = 0;
+  for (const t of targets) {
+    i++;
+    try {
+      const r = await scrapeMemberAttendance(page, slug, t.회원id, { 이름: t.이름 });
+      rows.push({ 회원id: String(t.회원id), site: slug, ...r });
+    } catch (err) {
+      failures.push({ 회원id: String(t.회원id), 이름: t.이름 || '', error: String(err?.message ?? err) });
+    }
+    if (onProgress) onProgress(i, targets.length);
+  }
+  return { rows, failures };
 }
