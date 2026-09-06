@@ -315,7 +315,7 @@ CSV 는 Excel 열람을 전제하므로 `=` `+` `-` `@` 로 시작하는 셀 값
     ([selectors.mjs](automation/studiomate/selectors.mjs) 의 `MEMBER_ID_VUE_PATH`).
     이건 API 직접 호출이 아니다(`x-sm-signature` 게이트를 흉내 내지 않는다는 결정과 무관).
   - ⚠️ **이용내역 탭은 URL 로 못 연다**(`?tab=` 무시). 탭을 클릭해야 한다.
-  - 🔥 **캐린더에는 수업이 아닌 블록도 있다 — `.event-item.etc`(기타 일정: 대관·외부행사).**
+  - 🔥 **캘린더에는 수업이 아닌 블록도 있다 — `.event-item.etc`(기타 일정: 대관·외부행사).**
     클릭하면 `/lecture/detail` 이 아니라 **`/etc-schedule/detail`** 로 간다. 그래서
     `waitForURL(/lecture\/detail/)` 이 40초를 버티다 죽고, **그날 그 사이트 수업이 통째로 빠졌다.**
     실사고(2026-09-03~05): 야간 실행 6번 중 5번 실패 · 9/5·9/6 청담·판교 예약·출석 0행.
