@@ -75,6 +75,10 @@ async function mockRows(mode, date) {
   );
 }
 
+/* 사이트 하나를 처음부터 다시 도는 횟수. 한 번이면 충분하다 — 지금까지의 실패는 전부
+   간헐적인 타임아웃이었고, 전 사이트 재시도는 러너 시간(timeout-minutes)을 그만큼 먹는다. */
+const SITE_RETRIES = 1;
+
 let _browser = null;
 let _page = null;
 const _loggedIn = new Set();
@@ -135,37 +139,56 @@ async function collect(mode, date) {
   /* ⚠️ 스크랩 단위는 "지점"이 아니라 "사이트"다 — 청담·판교가 everybarre 한 곳을 같이 쓴다.
      지점은 각 예약행의 수강권명에서 뽑히므로(branchOf), 여기서는 반환된 rows 를 지점별로 나눈다. */
   for (const site of SITES) {
-    try {
-      await ensureLogin(page, site.slug);
-      const { rows, 수업수, 누락, 대기, missing, 재확인 } = await scrapeBranch(page, site, { date, mode });
-      for (const r of rows) {
-        const b = r.지점 || '(미지정)';
-        if (env.ONLY_BRANCHES.length && !env.ONLY_BRANCHES.includes(b)) continue;
-        if (!byBranch.has(b)) byBranch.set(b, []);
-        byBranch.get(b).push(r);
+    /* 🔥 사이트 하나가 통째로 실패하면 그 지점의 하루치가 사라진다 — 청담·판교는 예약자의 절반이다.
+       2026-09-03~05 에 5번 그랬다(수업 상세 클릭이 40초 타임아웃). 스크랩은 읽기 전용이고
+       저장은 이 루프 밖에서 하므로(rows 는 메모리에만 쌓인다) 처음부터 다시 도는 것은 안전하다.
+       ⚠️ 마지막 시도까지 실패해야 fail() 이다 — 재시도가 실패를 감추지 않게 한다. */
+    let siteErr = null;
+    for (let attempt = 0; attempt <= SITE_RETRIES; attempt++) {
+      try {
+        await ensureLogin(page, site.slug);
+        const { rows, 수업수, 누락, 대기, missing, 재확인 } = await scrapeBranch(page, site, { date, mode });
+        for (const r of rows) {
+          const b = r.지점 || '(미지정)';
+          if (env.ONLY_BRANCHES.length && !env.ONLY_BRANCHES.includes(b)) continue;
+          if (!byBranch.has(b)) byBranch.set(b, []);
+          byBranch.get(b).push(r);
+        }
+        okCount++;
+        const perBranch = [...new Set(rows.map((r) => r.지점 || '(미지정)'))].join('/') || '-';
+        console.log(
+          `[scrape:${mode}] ${site.label} ${date}: 수업 ${수업수}개 · 예약자 ${rows.length}명 (${perBranch})` +
+            // 대기자는 rows 에 포함돼 있고 CRM 대상에서만 빠진다 — 몇 명이 빠지는지 보여야 한다
+            (대기 ? ` · 그중 예약대기 ${대기}명(CRM 제외)` : '') +
+            (수업수 > 0 && rows.length === 0 ? '  ⚠️ 수업은 있는데 예약자 0명 — 셀렉터 의심' : '') +
+            /* "0개"가 한 번 읽고 내린 판정인지, 재시도(날짜 흔들기·재로드)까지 해 본 판정인지
+               구분한다. 2026-08-13 러너에서 3개 사이트가 0개로 나갔는데 로그는 정상이었다.
+               어느 전략이 먹혔는지는 scrape.mjs 가 따로 경고로 찍는다. */
+            (재확인 && 수업수 === 0 ? '  (재시도 후에도 0개 — 휴무일로 봅니다)' : ''),
+        );
+        if (누락) {
+          // 조용히 지나가면 그 수업 예약자가 통째로 빠진 채 CRM 이 나간다
+          fail(`scrape:${mode}`, site.label, new Error(`수업 ${수업수}개 중 ${누락}개를 못 열었습니다`));
+        }
+        if (missing.length) {
+          console.warn(`  ⚠️ ${site.label}: 못 읽은 필드 ${missing.join(', ')} (selectors.mjs 확인)`);
+        }
+        siteErr = null;
+        break;
+      } catch (err) {
+        siteErr = err;
+        if (attempt < SITE_RETRIES) {
+          console.warn(
+            `  ⚠️ [${site.label}] ${mode} ${date}: 스크랩이 실패해 사이트를 처음부터 다시 시도합니다 ` +
+              `(${attempt + 1}/${SITE_RETRIES}) · ${String(err?.message ?? err).split('\n')[0].slice(0, 200)}`,
+          );
+          /* 세션이 끊겨서 실패한 것일 수도 있다 — 다음 시도는 로그인부터 다시 한다. */
+          _loggedIn.delete(site.slug);
+          await page.waitForTimeout(5000);
+        }
       }
-      okCount++;
-      const perBranch = [...new Set(rows.map((r) => r.지점 || '(미지정)'))].join('/') || '-';
-      console.log(
-        `[scrape:${mode}] ${site.label} ${date}: 수업 ${수업수}개 · 예약자 ${rows.length}명 (${perBranch})` +
-          // 대기자는 rows 에 포함돼 있고 CRM 대상에서만 빠진다 — 몇 명이 빠지는지 보여야 한다
-          (대기 ? ` · 그중 예약대기 ${대기}명(CRM 제외)` : '') +
-          (수업수 > 0 && rows.length === 0 ? '  ⚠️ 수업은 있는데 예약자 0명 — 셀렉터 의심' : '') +
-          /* "0개"가 한 번 읽고 내린 판정인지, 재시도(날짜 흔들기·재로드)까지 해 본 판정인지
-             구분한다. 2026-08-13 러너에서 3개 사이트가 0개로 나갔는데 로그는 정상이었다.
-             어느 전략이 먹혔는지는 scrape.mjs 가 따로 경고로 찍는다. */
-          (재확인 && 수업수 === 0 ? '  (재시도 후에도 0개 — 휴무일로 봅니다)' : ''),
-      );
-      if (누락) {
-        // 조용히 지나가면 그 수업 예약자가 통째로 빠진 채 CRM 이 나간다
-        fail(`scrape:${mode}`, site.label, new Error(`수업 ${수업수}개 중 ${누락}개를 못 열었습니다`));
-      }
-      if (missing.length) {
-        console.warn(`  ⚠️ ${site.label}: 못 읽은 필드 ${missing.join(', ')} (selectors.mjs 확인)`);
-      }
-    } catch (err) {
-      fail(`scrape:${mode}`, site.label, err);
     }
+    if (siteErr) fail(`scrape:${mode}`, site.label, siteErr);
   }
 
   if (SITES.length && okCount === 0) {

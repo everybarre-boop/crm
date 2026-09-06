@@ -300,6 +300,65 @@ async function gotoDate(page, target) {
   if (cur !== target) throw new Error(`목표 날짜에 도달하지 못했습니다 (${cur} ≠ ${target})`);
 }
 
+/** 에러 메시지의 첫 줄만 — Playwright 는 진단 로그를 여러 줄 붙여 던진다. */
+const 첫줄 = (err) => String(err?.message ?? err).split('\n')[0].slice(0, 200);
+
+/* ----------------------------------------------------------------------
+   캘린더로 되돌린다 — 목표 날짜의 수업 목록이 다시 보이는 상태로 만든다.
+   상세에서 뒤로 온 직후에도, 클릭이 어긋나 엉뚱한 화면에 있을 때도 같은 자리를 쓴다.
+   ⚠️ 이 SPA 는 ?date= 를 무시하므로 되돌아오면 캘린더가 오늘로 가 있을 수 있다.
+   ---------------------------------------------------------------------- */
+async function backToSchedule(page, site, date) {
+  if (!/\/schedule/.test(page.url())) {
+    await page.goto(URLS.schedule(site.slug), {
+      waitUntil: 'domcontentloaded',
+      timeout: TIMING.navTimeout,
+    });
+  }
+  await page
+    .locator(SELECTORS.calendar.classItem)
+    .first()
+    .waitFor({ timeout: TIMING.waitTimeout })
+    .catch(() => {});
+  if ((await currentDate(page)) !== date) await gotoDate(page, date);
+}
+
+/* ----------------------------------------------------------------------
+   수업 블록 클릭 → 상세 URL 로 넘어갈 때까지 기다린다. **재시도한다.**
+
+   🔥 2026-09-03~05: 바로 이 한 줄(waitForURL 40초)이 터져 청담·판교가 6번 중 5번
+      통째로 빠졌다. 9/5(금) 청담·판교 예약·출석 0행, 9/6(일) 청담 수업 누락.
+      클릭 한 번이 흔들리면(핸들러가 아직 안 붙었거나 목록이 다시 그려지는 중이면)
+      그 사이트 하루치가 전부 사라지고 exit 1 이 된다 — 예약자의 절반이 그 사이트에 있다.
+      한 번 더 눌러 보는 게 맞다. 클릭은 부작용이 없다(화면 이동뿐).
+
+   ⛔️ 실패를 삼키지 않는다. 끝내 못 열면 throw 한다 —
+      조용히 건너뛰면 그 수업 예약자가 통째로 빠진 채 CRM 이 나간다.
+   ---------------------------------------------------------------------- */
+async function clickToLectureDetail(page, items, i, { site, date, retries = 2 }) {
+  const label = site.label ?? site.slug;
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      await items.nth(i).click({ timeout: TIMING.waitTimeout });
+      await page.waitForURL(/\/lecture\/detail/, { timeout: TIMING.waitTimeout });
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= retries) break;
+      console.warn(
+        `  ⚠️ [${label}] ${date}: ${i + 1}번째 수업 상세로 넘어가지 못했습니다 ` +
+          `— 다시 시도합니다 (${attempt + 1}/${retries}) · ${첫줄(err)}`,
+      );
+      /* 어디에 있는지 모른다 — 캘린더·날짜를 확실히 되돌린 뒤 다시 누른다.
+         되돌리기 자체가 실패하면 그건 재시도로 풀릴 문제가 아니다(그대로 던진다). */
+      await backToSchedule(page, site, date);
+      await page.waitForTimeout(TIMING.daySettle);
+    }
+  }
+  throw lastErr;
+}
+
 /* ----------------------------------------------------------------------
    수업 상세 한 건 읽기
    ---------------------------------------------------------------------- */
@@ -590,8 +649,7 @@ export async function scrapeBranch(page, site, { date, navigate = true }) {
   for (let pass = 0; pass < 2 && seen.size < 수업수; pass++) {
     const n = await items.count();
     for (let i = 0; i < n; i++) {
-      await items.nth(i).click({ timeout: TIMING.waitTimeout });
-      await page.waitForURL(/\/lecture\/detail/, { timeout: TIMING.waitTimeout });
+      await clickToLectureDetail(page, items, i, { site, date });
 
       const id = new URL(page.url()).searchParams.get('id');
       if (!id) {
@@ -604,13 +662,7 @@ export async function scrapeBranch(page, site, { date, navigate = true }) {
       }
 
       await page.goBack({ waitUntil: 'domcontentloaded', timeout: TIMING.navTimeout });
-      await page
-        .locator(SELECTORS.calendar.classItem)
-        .first()
-        .waitFor({ timeout: TIMING.waitTimeout })
-        .catch(() => {});
-      /* 이 SPA 는 ?date= 를 무시하므로 뒤로 가면 캘린더가 오늘로 되돌아갈 수 있다. */
-      if ((await currentDate(page)) !== date) await gotoDate(page, date);
+      await backToSchedule(page, site, date);
       if (seen.size >= 수업수) break;
     }
   }
