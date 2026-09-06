@@ -335,7 +335,7 @@ async function backToSchedule(page, site, date) {
    ⛔️ 실패를 삼키지 않는다. 끝내 못 열면 throw 한다 —
       조용히 건너뛰면 그 수업 예약자가 통째로 빠진 채 CRM 이 나간다.
    ---------------------------------------------------------------------- */
-async function clickToLectureDetail(page, items, i, { site, date, retries = 2 }) {
+async function clickToLectureDetail(page, items, i, { site, date, retries = 1 }) {
   const label = site.label ?? site.slug;
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -646,10 +646,25 @@ export async function scrapeBranch(page, site, { date, navigate = true }) {
      못 본 수업이 남으면 한 번 더 훑는다. */
   const seen = new Set();
   const ids = [];
-  for (let pass = 0; pass < 2 && seen.size < 수업수; pass++) {
+  /* 🔥 끝내 못 여는 블록의 수. **이 하나 때문에 사이트 전체를 버리지 않는다.**
+     2026-09-05 청담·판교: 6번째 블록이 세 번 모두 같은 자리에서 안 열렸다(간헐적이 아니다).
+     그런데 그 하나를 throw 하는 바람에 같은 날 수업 11개가 통째로 빠졌다 — 10개라도 살리는 게 맞다.
+     ⚠️ 조용히 넘기지는 않는다: 아래 `누락` 검사가 fail() 로 올려 운영 채널에 건수가 간다. */
+  let 못열음 = 0;
+  for (let pass = 0; pass < 2 && seen.size + 못열음 < 수업수; pass++) {
     const n = await items.count();
     for (let i = 0; i < n; i++) {
-      await clickToLectureDetail(page, items, i, { site, date });
+      try {
+        await clickToLectureDetail(page, items, i, { site, date });
+      } catch (err) {
+        못열음++;
+        console.error(
+          `  ❌ [${site.label ?? site.slug}] ${date}: ${i + 1}번째 수업 블록을 끝내 열지 못했습니다 ` +
+            `— **이 수업만** 빠지고 나머지는 계속합니다 · ${첫줄(err)}`,
+        );
+        await backToSchedule(page, site, date);
+        continue;
+      }
 
       const id = new URL(page.url()).searchParams.get('id');
       if (!id) {
@@ -701,7 +716,8 @@ export async function scrapeBranch(page, site, { date, navigate = true }) {
   }
 
   const missing = rows.length ? WANTED.filter((f) => rows.every((r) => !r[f])) : [];
-  // 못 본 수업이 있으면 조용히 넘기지 않는다
+  /* 못 본 수업이 있으면 조용히 넘기지 않는다.
+     끝내 못 열어 건너례 블록도 여기에 잡힌다(수업수 에는 있고 seen 에는 없다). */
   const 누락 = 수업수 - seen.size;
   const 대기 = rows.filter((r) => r.예약상태 === WAITLIST).length;
   /* 재확인 = "0개로 보여서 화면을 새로 로드해 다시 셌다". 결과가 0이든 아니든 남긴다 —
