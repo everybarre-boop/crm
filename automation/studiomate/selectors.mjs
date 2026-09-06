@@ -82,8 +82,19 @@ export const SELECTORS = {
     dayViewRadio: (v) => `input.el-radio-button__orig-radio[value="${v}"]`,
     dayViewLabel: (v) => `label:has(input.el-radio-button__orig-radio[value="${v}"])`,
 
-    /** 수업 블록. 클릭하면 /lecture/detail 로 이동한다. */
-    classItem: '.event-item',
+    /* 수업 블록. 클릭하면 /lecture/detail 로 이동한다.
+
+       🔥 `.etc` 를 반드시 제외한다 — 캐린더에는 수업 말고 **기타 일정**(대관·외부행사)도
+          같은 `.event-item` 으로 그려진다. 이건 클릭하면 `/lecture/detail` 이 아니라
+          **`/etc-schedule/detail`** 로 간다 — 즉 `waitForURL(/lecture\/detail/)` 이 영원히 안 맞는다.
+          실측(2026-09-05 청담·판교): '한국바레협회29기 12:00~18:00' 블록 하나가 40초 타임아웃을
+          내면서 **그날 그 사이트 수업 전체가 통째로 빠졌다**(9/5·9/6 이틀 예약·출석 0행).
+          2026-09-03~05 야간 실행 실패 5건은 예외 없이 전부 이 두 날짜가 대상이었다.
+       ⚠️ 기타 일정에는 예약자 목록이 없다(상세 확인: 예약자 0명). 빼도 잃는 데이터가 없고,
+          무엇보다 `수업수` 가 정확해져 "못 열은 수업 N개"(누락) 오진단이 사라진다.
+       ⚠️ 4주치(2026-08-24~09-21)를 훑은 결과 수업 외 종류는 `etc` 뿐이었다. 다른 종류가
+          나타나면 같은 자리에 더한다 — 스크래퍼 흐름(scrape.mjs)은 건드리지 않는다. */
+    classItem: '.event-item:not(.etc)',
   },
 
   // ── 수업 상세 ─────────────────────────────────────────────────────────
