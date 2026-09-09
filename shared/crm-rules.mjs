@@ -22,6 +22,7 @@ import {
   personKey,
   pickTicketRow,
   renderTemplate,
+  ticketKey,
   toInt,
   usageAudit,
   usedCount,
@@ -97,8 +98,10 @@ export const DEFAULT_RULES = [
     id: 'expiring', 라벨: '만료 임박', 이모지: '⏳', 활성: true, 슬랙발송: true,
     /* 최소전체횟수 — 1회권·체험권을 만료임박에서 뺀다. 전체=1·잔여=1 은 비율이 항상 1.0 이라
        비율 조건을 **무조건** 통과한다(아래 ④ 주석의 실측 사고). */
+    /* 재등록제외 — **이미 다음 수강권을 끊은 회원**에게 "재등록하면 이월돼요"는 틀린 말이다.
+       판정 기준은 아래 hasRenewalTicket 참고(종료일 이후 시작이 아니라 **더 늦게 끝나는 권**). */
     정렬순서: 20, 재발송억제일수: 7,
-    파라미터: { 만료임박일: 7, 잔여비율: 0.3, 최소전체횟수: 2 },
+    파라미터: { 만료임박일: 7, 잔여비율: 0.3, 최소전체횟수: 2, 재등록제외: true },
     템플릿: '잔여 {{잔여횟수}}/{{전체횟수}}회 · {{수강권종료일}} 만료({{남은일}}일 남음)',
     예시멘트: '{{이름}}님, 수강권이 {{수강권종료일}}에 끝나는데 아직 {{잔여횟수}}회 남으셨어요. 추가 등록하시면 남은 횟수는 그대로 이월돼요!',
   },
@@ -189,6 +192,41 @@ export function pickTicketForReservation(memberRows, resv) {
     if (exact.length) return pickTicketRow(dedupeTicketRows(exact));
   }
   return pickTicketRow(dedupeTicketRows(same));
+}
+
+/* ----------------------------------------------------------------------
+   "이미 재등록했는가" — 만료 임박 안내에서 뺄 회원 판정.
+
+   🔥 실측(2026-09-09 재업로드 후 · members 18,897행): **재등록은 옛 수강권이 끝난 뒤에
+      시작하지 않는다.** 같은 사람의 연속한 등록건 9,995쌍 중 6,358쌍(63.6%)이
+      **이전 종료일보다 먼저** 시작했다(중앙값 −14일). 결제한 날부터 새 권이 열리기 때문이다.
+      그래서 "기존 종료일 이후에 시작한 수강권"으로 걸면 그날 만료 임박 후보 31명 중
+      **4명**만 걸린다 — 실제로 재등록한 6명 중 **2명(33%)을 놓친다.**
+      ✅ 그래서 **그 만료일 이후까지 유효한(= 더 늦게 끝나는) 다른 등록건**으로 본다(6명 전원).
+
+   · 등록건 단위로 접고(dedupeTicketRows) 비교한다 — 같은 등록건의 중복 행(이름 표식·
+     결제 분할)이 자기 자신을 "다음 수강권"으로 오인하게 두면 전원이 제외된다.
+   · 잔여 0 인 권은 다음 수강권이 아니다(끝난 권). 다만 잔여가 **비어 있으면** 판단
+     근거가 없으므로 유효한 것으로 본다 — 이 규칙이 막으려는 건 "이미 등록한 사람에게
+     등록 권유가 나가는 것"이라, 모를 때는 보내지 않는 쪽이 안전하다.
+   ⚠️ **근거는 members 라, 회원 엑셀 업로드가 밀리면 그 사이 재등록이 안 보인다.**
+      같은 날 실측으로 확인됐다 — 업로드가 8일 밀렸을 때(최신 수강권시작일 09-01)는
+      후보 34명 중 2명만 걸렸는데, 재업로드 직후 같은 조건이 31명 중 **6명**을 걸렀다.
+      주 1회 재업로드 루틴이 이 조건의 전제다(docs/CRM-SLACK.md "주간 교차검증 루틴").
+   ---------------------------------------------------------------------- */
+export function hasRenewalTicket(memberRows, ticket) {
+  const 만료 = ymdNum(ticket && ticket.수강권종료일);
+  if (만료 === null) return false;
+  const self = ticketKey(ticket);
+  for (const t of dedupeTicketRows(memberRows || [])) {
+    if (ticketKey(t) === self) continue;
+    const end = ymdNum(t.수강권종료일);
+    if (end === null || end <= 만료) continue; // 만료 이후까지 쓸 수 있는 권이어야 한다
+    const 잔여 = String(t.잔여횟수 ?? '').trim();
+    if (잔여 !== '' && toInt(잔여) <= 0) continue; // 다 쓴 권은 "다음 수강권"이 아니다
+    return true;
+  }
+  return false;
 }
 
 /* ----------------------------------------------------------------------
@@ -362,6 +400,8 @@ export function buildCrm({
   /* 회원 페이지를 못 읽어 출석 근거가 없는 예약자. 회차를 말할 수 없으니 마일스톤을 건너뛴다.
      조용히 넘기면 "그날 마일스톤이 0건"이 정상처럼 보이므로 건수로 남긴다. */
   let 근거없음 = 0;
+  /* 만료 임박에서 "이미 재등록함"으로 뺀 건수. 조용히 줄면 규칙이 꺼진 것과 구별이 안 된다. */
+  let 재등록제외 = 0;
 
   for (const r of roster) {
     const k = keyOf(r);
@@ -562,11 +602,18 @@ export function buildCrm({
       const 남은일 = daysBetween(today, ticket.수강권종료일);
       const 전체 = toInt(ticket.전체횟수);
       const 잔여 = toInt(ticket.잔여횟수);
-      if (
+      const 조건충족 =
         남은일 !== null && 남은일 >= 0 && 남은일 <= 만료임박일 &&
         전체 >= 최소전체횟수 && 잔여 / 전체 >= 잔여비율 &&
-        !isTrialTicket(r.수강권명, [])
-      ) {
+        !isTrialTicket(r.수강권명, []);
+      /* 🔥 이미 재등록한 회원 제외 — "추가 등록하시면 이월돼요"는 다음 수강권을 이미 끊은
+         사람에게는 틀린 말이고, 등록을 두 번 권하는 꼴이다. 판정은 hasRenewalTicket.
+         ⚠️ 다른 조건을 다 통과한 건에서만 센다 — 아니면 통계가 "만료도 안 임박한 사람"까지
+            세어 부풀고, 규칙이 몇 건을 실제로 막았는지 알 수 없다. */
+      const 재등록함 =
+        조건충족 && p.재등록제외 !== false && hasRenewalTicket(mem, ticket);
+      if (재등록함) 재등록제외++;
+      if (조건충족 && !재등록함) {
         push('expiring', r.수강권명, { 남은일 }, {
           잔여횟수: 잔여, 전체횟수: 전체, 잔여비율: Math.round((잔여 / 전체) * 100) / 100,
           수강권종료일: ticket.수강권종료일 ?? '', 남은일,
@@ -687,6 +734,7 @@ export function buildCrm({
 
   const stats = { 예약: roster.length, 멘트: picked.length, 휴면: dormant.length };
   if (보류.length) stats.마일스톤보류 = 보류.length;
+  if (재등록제외) stats.만료임박_재등록제외 = 재등록제외;
   if (근거없음) stats.출석근거없음 = 근거없음;
   stats.회차근거 = 출석근거있음 ? '출석기록' : '차감횟수';
   for (const m of picked) stats[m.rule_id] = (stats[m.rule_id] ?? 0) + 1;

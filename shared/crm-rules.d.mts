@@ -76,5 +76,7 @@ export function buildCrm(input: BuildCrmInput): BuildCrmResult;
 export function groupMessagesByBranch(
   messages: readonly CrmMessageDraft[],
 ): Map<string, CrmMessageDraft[]>;
+/** 만료 임박 안내에서 뺄 회원 판정 — 그 만료일 이후까지 유효한 다른 등록건이 있는가 */
+export function hasRenewalTicket(memberRows: readonly Rec[], ticket: Rec): boolean;
 export function personKey(rec: Rec): string;
 export function ymdNum(dateStr: unknown): number | null;
