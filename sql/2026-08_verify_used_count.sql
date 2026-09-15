@@ -64,7 +64,15 @@ select p.이름, p.누적, coalesce(r.출석, 0) as 관측출석, p.최초시작
          else '발송 가능'
        end as 판정
 from per_person p left join res r using (pk) cross join depth d
-where (p.누적 + 1) = any (array[10, 30, 50, 100, 150, 200, 300, 500])
+-- 회차 목록은 규칙 행에서 읽는다 — 하드코딩하면 관리자 화면에서 목록을 바꾼 날
+-- 이 점검이 조용히 엉뚱한 사람을 본다(2026-09-15 개정: 22 + 50회 단위).
+where (p.누적 + 1) = any (
+        coalesce(
+          (select array_agg(t.v::int)
+             from public.crm_rules r,
+                  lateral jsonb_array_elements_text(r."파라미터" -> '마일스톤') as t(v)
+            where r.id = 'milestone'),
+          array[22, 50, 100, 150, 200, 250, 300, 350, 400, 450, 500]))
 order by 판정, p.누적 desc
 limit 40;
 

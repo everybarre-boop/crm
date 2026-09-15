@@ -471,10 +471,147 @@ const VARS = [
 
 const SAMPLE: Record<string, string | number> = {
   이름: '홍길동', 지점: '광교', 수업시간: '10:00', 수업명: '바레 그룹',
-  수강권명: '바레 그룹 20회 (광교)', 누적횟수: 100, 마일스톤: 100,
+  수강권명: '바레 그룹 20회 (광교)', 누적횟수: 99, 마일스톤: 100,
   잔여횟수: 6, 전체횟수: 20, 수강권종료일: '2026-08-12', 남은일: 7,
   마지막출석일: '2026-07-22', 경과일: 14, 잔여합: 8,
 };
+
+/* ----------------------------------------------------------------------
+   마일스톤 회차별 멘트 편집기
+   ---------------------------------------------------------------------
+   회차 목록(파라미터.마일스톤)과 회차별 예시멘트(파라미터.마일스톤멘트)를 한 화면에서
+   다룬다. JSON 을 직접 고치지 않아도 되게 하는 게 목적이다(아래 JSON 상자는 그대로 남는다 —
+   같은 값을 보여 주고, 둘 중 어느 쪽으로 고쳐도 결과가 같다).
+
+   ⚠️ 상황 한 줄(템플릿)은 회차별로 나누지 않는다. 그건 "지금까지 N회 · 이번 수업이 M회차"
+      라는 **사실 기술**이라, 강사가 스튜디오메이트와 대조할 수 있어야 한다.
+      회차마다 달라지는 건 "무슨 말을 건넬까"(예시멘트)뿐이다.
+   ⚠️ 멘트를 비우면 공통 예시멘트로 떨어진다(shared/crm-rules.mjs 의 `개별멘트 || rule.예시멘트`).
+      그래서 "공통으로 되돌리기"는 그냥 그 키를 지우는 것이다.
+   ---------------------------------------------------------------------- */
+function MilestoneParams({
+  params,
+  공통멘트,
+  onChange,
+}: {
+  params: Record<string, unknown>;
+  공통멘트: string;
+  onChange: (p: Record<string, unknown>) => void;
+}) {
+  const [추가값, set추가값] = useState('');
+
+  const list = Array.isArray(params.마일스톤)
+    ? (params.마일스톤 as unknown[]).map(Number).filter((n) => Number.isFinite(n) && n > 0)
+    : [];
+  const 정렬 = [...new Set(list)].sort((a, b) => a - b);
+  const raw = params.마일스톤멘트;
+  const 멘트맵: Record<string, string> =
+    raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, string>) : {};
+
+  const write = (다음목록: number[], 다음맵: Record<string, string>) => {
+    // 키 순서를 회차 오름차순으로 맞춰 둔다 — JSON 상자에서 눈으로 따라가기 쉽게.
+    const 정리: Record<string, string> = {};
+    for (const n of 다음목록) if (다음맵[String(n)]) 정리[String(n)] = 다음맵[String(n)];
+    onChange({ ...params, 마일스톤: 다음목록, 마일스톤멘트: 정리 });
+  };
+
+  const setMent = (n: number, v: string) => write(정렬, { ...멘트맵, [String(n)]: v });
+  const reset = (n: number) => {
+    const next = { ...멘트맵 };
+    delete next[String(n)];
+    write(정렬, next);
+  };
+  const remove = (n: number) => write(정렬.filter((x) => x !== n), 멘트맵);
+  const add = () => {
+    const n = Number(추가값);
+    if (!Number.isFinite(n) || n <= 0) return;
+    if (정렬.includes(n)) {
+      set추가값('');
+      return;
+    }
+    write([...정렬, n].sort((a, b) => a - b), 멘트맵);
+    set추가값('');
+  };
+
+  return (
+    <div className="mb-4 rounded-[10px] border border-border p-3">
+      <div className="mb-1 text-[12px] font-semibold">마일스톤 회차별 멘트</div>
+      <p className="m-0 mb-3 text-[11px] leading-relaxed text-muted">
+        회차마다 다른 문장을 넣을 수 있습니다. 비워 두면 위의 <strong>공통 예시 멘트</strong>가
+        나갑니다. 상황 한 줄(슬랙 본문)은 회차와 상관없이 같습니다 — 강사가 스튜디오메이트와
+        대조할 수 있어야 하는 <strong>사실 기술</strong>이기 때문입니다.
+      </p>
+
+      {정렬.length === 0 ? (
+        <p className="m-0 mb-3 text-[12px] text-danger">
+          회차가 하나도 없습니다 — 이 상태로 저장하면 마일스톤이 아무에게도 나가지 않습니다.
+        </p>
+      ) : (
+        정렬.map((n) => {
+          const 개별 = String(멘트맵[String(n)] ?? '');
+          const 미리보기 = renderTemplate(개별.trim() || 공통멘트, {
+            ...SAMPLE,
+            마일스톤: n,
+            누적횟수: n - 1, // 발송 시점의 실제 누적 = 마일스톤 − 1
+          });
+          return (
+            <div key={n} className="mb-2 rounded-[8px] bg-[#f7f8fa] p-[10px]">
+              <div className="mb-[6px] flex items-center gap-2">
+                <span className="text-[13px] font-semibold">{n}회차</span>
+                <span
+                  className={`rounded-[6px] px-[6px] py-[2px] text-[11px] ${
+                    개별.trim() ? 'bg-[#e4ecff] text-primary' : 'bg-[#eef1f6] text-muted'
+                  }`}
+                >
+                  {개별.trim() ? '개별 멘트' : '공통 멘트'}
+                </span>
+                <span className="flex-1" />
+                {개별.trim() && (
+                  <button className={btn.ghostSm} onClick={() => reset(n)}>
+                    공통으로
+                  </button>
+                )}
+                <button className={btn.dangerGhostSm} onClick={() => remove(n)}>
+                  회차 삭제
+                </button>
+              </div>
+              <textarea
+                className={`${input} min-h-[60px] bg-white`}
+                placeholder={공통멘트}
+                value={개별}
+                onChange={(e) => setMent(n, e.target.value)}
+              />
+              <div className="mt-[6px] text-[12px] text-muted">↳ “{미리보기}”</div>
+            </div>
+          );
+        })
+      )}
+
+      <div className="mt-3 flex items-center gap-2">
+        <input
+          className={`${input} w-[120px]`}
+          type="number"
+          min={1}
+          placeholder="회차"
+          value={추가값}
+          onChange={(e) => set추가값(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              add();
+            }
+          }}
+        />
+        <button className={btn.ghostSm} onClick={add}>
+          회차 추가
+        </button>
+        <span className="text-[11px] text-muted">
+          현재 {정렬.length}개 · {정렬.join(' · ')}
+        </span>
+      </div>
+    </div>
+  );
+}
 
 function RuleEditor({
   rule,
@@ -489,6 +626,15 @@ function RuleEditor({
 }) {
   const [paramText, setParamText] = useState(() => JSON.stringify(rule.파라미터 ?? {}, null, 2));
   const [paramErr, setParamErr] = useState<string | null>(null);
+
+  /* 전용 UI(마일스톤 등)가 파라미터를 고칠 때 쓰는 통로.
+     ⚠️ 아래 JSON 상자와 **같은 값**을 보게 해야 한다 — 한쪽만 갱신하면 저장 직전에
+        JSON 상자가 옛 값을 덮어써서 방금 한 편집이 조용히 사라진다. */
+  const setParams = (p: Record<string, unknown>) => {
+    onChange({ ...rule, 파라미터: p });
+    setParamText(JSON.stringify(p, null, 2));
+    setParamErr(null);
+  };
 
   return (
     <>
@@ -535,6 +681,10 @@ function RuleEditor({
         </p>
       </div>
 
+      {rule.id === 'milestone' && (
+        <MilestoneParams params={rule.파라미터 ?? {}} 공통멘트={rule.예시멘트} onChange={setParams} />
+      )}
+
       <label className="mb-1 block text-[12px] font-semibold">파라미터 (JSON)</label>
       <textarea
         className={`${input} mb-1 min-h-[90px] font-mono text-[12px]`}
@@ -548,6 +698,7 @@ function RuleEditor({
             setParamErr((err as Error).message);
           }
         }}
+        spellCheck={false}
       />
       {paramErr && <p className="m-0 mb-2 text-[12px] text-danger">JSON 형식 오류: {paramErr}</p>}
 

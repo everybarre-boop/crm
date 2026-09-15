@@ -159,6 +159,63 @@ test('마일스톤: 내일 수업이 2개면 가장 이른 수업 하나에만 �
   assert.equal(ms[0].수업시간, '10:00');
 });
 
+/* 2026-09-15 개정 — 목록이 "22회 + 50회부터 50회 단위"로 바뀌었다.
+   앞 단계(첫 수업·체험 후 첫 수업)는 trial / first-paid 규칙이 따로 맡으므로
+   10·30 회차는 더 이상 마일스톤이 아니다. */
+test('마일스톤: 22회차가 발동한다', () => {
+  const r = run({
+    memberRows: [mem({ 전체횟수: '40', 잔여횟수: '19' })], // 사용 21 → 예정 22
+    rosterRows: [resv()],
+  });
+  const m = one(r, 'milestone');
+  assert.ok(m, '22회차가 마일스톤 목록에서 빠졌다');
+  assert.equal(m.규칙키, '22');
+});
+
+test('마일스톤: 10회차·30회차는 더 이상 발동하지 않는다', () => {
+  for (const [전체, 잔여] of [['40', '31'], ['40', '11']]) {
+    const r = run({ memberRows: [mem({ 전체횟수: 전체, 잔여횟수: 잔여 })], rosterRows: [resv()] });
+    assert.equal(one(r, 'milestone'), undefined, `사용 ${Number(전체) - Number(잔여)} 에서 옛 마일스톤이 살아 있다`);
+  }
+});
+
+test('마일스톤: 250·350·450 도 목록에 있다 (50회 단위)', () => {
+  for (const 목표 of [250, 350, 450]) {
+    const r = run({
+      memberRows: [mem({ 전체횟수: '600', 잔여횟수: String(600 - (목표 - 1)) })],
+      rosterRows: [resv()],
+    });
+    const m = one(r, 'milestone');
+    assert.ok(m, `${목표}회차가 안 잡혔다`);
+    assert.equal(m.규칙키, String(목표));
+  }
+});
+
+/* 회차별 멘트 — 관리자 화면에서 마일스톤마다 다른 문장을 넣을 수 있어야 한다.
+   ⚠️ 상황 한 줄(템플릿)은 회차와 무관하게 같아야 한다(사실 기술이라 대조 가능해야 한다). */
+test('마일스톤: 회차별 멘트가 설정돼 있으면 그 멘트가 나간다', () => {
+  const r = run({
+    memberRows: [mem({ 전체횟수: '40', 잔여횟수: '19' })], // 예정 22
+    rosterRows: [resv()],
+    rules: rulesWith('milestone', { 마일스톤멘트: { 22: '{{이름}}님, 스물두 번째!', 50: '쉰 번째!' } }),
+  });
+  const m = one(r, 'milestone');
+  assert.ok(m);
+  assert.equal(m.예시멘트, '홍길동님, 스물두 번째!');
+  assert.match(m.멘트, /지금까지 21회/, '상황 한 줄은 회차별 멘트와 무관하게 유지돼야 한다');
+});
+
+test('마일스톤: 그 회차에 멘트가 없으면 공통 예시멘트로 떨어진다', () => {
+  const r = run({
+    memberRows: [mem({ 전체횟수: '40', 잔여횟수: '19' })], // 예정 22 — 맵에는 50 만 있다
+    rosterRows: [resv()],
+    rules: rulesWith('milestone', { 마일스톤멘트: { 50: '쉰 번째!' } }),
+  });
+  const m = one(r, 'milestone');
+  assert.ok(m);
+  assert.match(m.예시멘트, /이번 수업이 22번째/, '공통 멘트 폴백이 끊겼다');
+});
+
 /* ==========================================================================
    ② 억제 — 평생 1회. 단, 같은 날 재실행분은 억제 근거가 아니다
    ========================================================================== */
@@ -333,9 +390,9 @@ test('규칙 파라미터: DB 행에 없는 키는 코드 기본값으로 채운
    ========================================================================== */
 test('1인 1건: 마일스톤과 체험이 겹치면 마일스톤만 남는다', () => {
   const r = run({
-    // 누적 9 (과거 유료권) + 내일 체험권 수업 → 10회차 마일스톤 & 체험 둘 다 후보
+    // 누적 21 (과거 유료권) + 내일 체험권 수업 → 22회차 마일스톤 & 체험 둘 다 후보
     memberRows: [
-      mem({ 수강권명: '바레 그룹 40회 (광교)', 전체횟수: '40', 잔여횟수: '31', dedup_key: 'a' }),
+      mem({ 수강권명: '바레 그룹 40회 (광교)', 전체횟수: '40', 잔여횟수: '19', dedup_key: 'a' }),
       mem({ 수강권명: '체험권 (광교)', 전체횟수: '1', 잔여횟수: '1', dedup_key: 'b' }),
     ],
     rosterRows: [resv({ 수강권명: '체험권 (광교)' })],
@@ -348,7 +405,7 @@ test('1인 1건: 마일스톤과 체험이 겹치면 마일스톤만 남는다',
 test('1인 1건: 다른 사람끼리는 각자 받는다', () => {
   const r = run({
     memberRows: [
-      mem({ 이름: 'A', 연락처: '010-1111-1111', 전체횟수: '40', 잔여횟수: '31', dedup_key: 'a' }),
+      mem({ 이름: 'A', 연락처: '010-1111-1111', 전체횟수: '40', 잔여횟수: '19', dedup_key: 'a' }), // 차감 21 → 22회차
       mem({ 이름: 'B', 연락처: '010-2222-2222', 수강권명: '체험권 (광교)', dedup_key: 'b' }),
     ],
     rosterRows: [
@@ -1038,28 +1095,28 @@ const 사이트 = (지점) => ({ 청담: 'everybarre', 판교: 'everybarre', 광
 const att = (o = {}) => ({ person_key: PK, site: 'everybarre-gwanggyo', 기준일: TODAY, 출석수: 9, ...o });
 
 test('출석근거: 결석은 회차에 안 들어간다 (차감 횟수는 결석도 센다)', () => {
-  /* members 는 전체 20 · 잔여 8 → 차감 12. 옛 경로였다면 "13회차".
-     실제 출석은 9회뿐이므로 내일이 10회차다 — 그게 맞는 값이다. */
+  /* members 는 전체 40 · 잔여 16 → 차감 24. 옛 경로였다면 "25회차"(마일스톤 아님).
+     실제 출석은 21회뿐이므로 내일이 22회차다 — 그게 맞는 값이다. */
   const r = run({
-    memberRows: [mem({ 전체횟수: '20', 잔여횟수: '8' })],
+    memberRows: [mem({ 전체횟수: '40', 잔여횟수: '16' })],
     rosterRows: [resv()],
-    attendanceRows: [att({ 출석수: 9 })],
+    attendanceRows: [att({ 출석수: 21 })],
     siteOfBranch: 사이트,
   });
   const m = one(r, 'milestone');
-  assert.ok(m, '출석 9회 + 내일 = 10회차인데 마일스톤이 안 잡혔다');
-  assert.equal(m.규칙키, '10');
-  assert.equal(m.근거.누적횟수, 9);
+  assert.ok(m, '출석 21회 + 내일 = 22회차인데 마일스톤이 안 잡혔다');
+  assert.equal(m.규칙키, '22');
+  assert.equal(m.근거.누적횟수, 21);
   assert.equal(m.근거.근거출처, '출석기록');
-  assert.equal(m.근거.차감누적, 12, '옛 값도 근거에 남겨 둔다(둘이 벌어지는 정도 추적용)');
-  assert.match(m.멘트, /지금까지 9회/);
+  assert.equal(m.근거.차감누적, 24, '옛 값도 근거에 남겨 둔다(둘이 벌어지는 정도 추적용)');
+  assert.match(m.멘트, /지금까지 21회/);
 });
 
 test('출석근거: 1 모자라면 발동하지 않는다 (경계)', () => {
   const r = run({
-    memberRows: [mem({ 전체횟수: '20', 잔여횟수: '8' })], // 차감 12 — 옛 경로면 켜졌을 값
+    memberRows: [mem({ 전체횟수: '40', 잔여횟수: '19' })], // 차감 21 — 옛 경로면 켜졌을 값
     rosterRows: [resv()],
-    attendanceRows: [att({ 출석수: 8 })], // 내일이 9회차
+    attendanceRows: [att({ 출석수: 20 })], // 내일이 21회차
     siteOfBranch: 사이트,
   });
   assert.equal(one(r, 'milestone'), undefined);
@@ -1084,10 +1141,10 @@ test('출석근거: 두 사이트 출석 수가 합산된다 (한쪽만 보면 �
 });
 
 test('출석근거: 근거가 없는 회원은 마일스톤을 보내지 않는다 (지어내지 않는다)', () => {
-  /* 회원 페이지를 못 읽은 사람. 차감 횟수로는 "10회차"지만, 그 값이 틀리다는 게
+  /* 회원 페이지를 못 읽은 사람. 차감 횟수로는 "22회차"지만, 그 값이 틀리다는 게
      이 작업의 전제다 — 그러니 지어내지 말고 건너뛰고, 건수로 경고한다. */
   const r = run({
-    memberRows: [mem({ 전체횟수: '20', 잔여횟수: '11' })], // 차감 9 → 옛 경로면 10회차
+    memberRows: [mem({ 전체횟수: '40', 잔여횟수: '19' })], // 차감 21 → 옛 경로면 22회차
     rosterRows: [resv()],
     attendanceRows: [att({ person_key: '다른사람\u001f01099998888' })],
     siteOfBranch: 사이트,
@@ -1102,20 +1159,20 @@ test('출석근거: 오늘 값이 아니면 보류한다 (스크랩이 빠지면
   const r = run({
     memberRows: [mem()],
     rosterRows: [resv()],
-    attendanceRows: [att({ 기준일: '2026-08-03', 출석수: 8 })],
+    attendanceRows: [att({ 기준일: '2026-08-03', 출석수: 20 })],
     recentReservations: [
       { person_key: PK, 지점: '광교', 예약일자: '2026-08-04', 예약상태: '출석' },
     ],
     siteOfBranch: 사이트,
   });
-  assert.equal(one(r, 'milestone'), undefined, '보정으로 9가 되어도 오늘 값이 아니면 보내지 않는다');
+  assert.equal(one(r, 'milestone'), undefined, '보정으로 21이 되어도 오늘 값이 아니면 보내지 않는다');
   assert.equal(r.stats.마일스톤보류, 1);
   assert.ok(r.warnings.some((w) => w.includes('마일스톤') && w.includes('보류')));
 });
 
 test('출석근거: attendanceRows 가 비면 옛 경로로 폴백한다 (도입 첫날·MOCK)', () => {
   const r = run({
-    memberRows: [mem({ 전체횟수: '20', 잔여횟수: '11' })], // 차감 9 → 10회차
+    memberRows: [mem({ 전체횟수: '40', 잔여횟수: '19' })], // 차감 21 → 22회차
     rosterRows: [resv()],
   });
   const m = one(r, 'milestone');
