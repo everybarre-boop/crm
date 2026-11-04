@@ -14,18 +14,25 @@ import {
   makePersonResolver,
   matchesBranch,
   BRANCHES,
+  KEY_SEP,
   type MemberRecord,
 } from '@/lib/members';
 import { SALES_TABLE } from '@/lib/sales';
+import { sb } from '@/lib/supabase';
 import { Modal } from '@/components/ui/Modal';
 import { btn, input, card, spinner } from '@/components/ui/styles';
 
 /* ======================================================================
    회원별 집계 — "이 사람이 지금까지 몇 회 했고 얼마 결제했나"를 1인 단위로.
    members(등록건)·sales(결제건)를 이름+연락처(숫자)로 묶어 CRM의 핵심 데이터를 만든다.
-   - 총 사용횟수 = 그 사람의 **수강권 등록건별** 사용횟수 합(personUsedCount).
+   - 출석(실측) = 스튜디오메이트 회원 페이지의 `출석(N)` 전 사이트 합(crm_attendance_person).
+     야간 자동화가 **예약이 잡힌 회원만** 읽으므로 없는 사람은 '—'. 결석·노쇼는 안 들어간다.
+   - 차감 횟수 = 그 사람의 **수강권 등록건별** (전체−잔여) 합(personUsedCount).
+     결석·노쇼도 차감되므로 출석보다 크게 나오는 게 정상이다(권인정: 차감 474 · 출석 418).
      ⚠️ member 행을 그냥 더하면 안 된다 — 같은 수강권 한 장이 이름 표식·결제 분할로
         여러 행이 되고 그 행들이 같은 잔여횟수를 각자 든다(2026-08-14 마일스톤 오발송의 원인).
+     🔥 등록건 = 수강권명 + **수강권시작일**. 예전에 select 에서 수강권시작일이 빠져 같은
+        수강권명의 재등록이 전부 1건으로 접혔다(권인정 114회로 표시 — 2026-11-04 수정).
    - 총 결제금액 = 그 사람 sales 행들의 결제금액 합 (sales가 결제 원장)
    ====================================================================== */
 
@@ -36,6 +43,7 @@ type Person = {
   members: MemberRecord[]; // 보유 수강권(등록건)들
   sales: MemberRecord[]; // 결제 내역들
   총사용: number;
+  출석: number | null; // 실측 출석 수 — 근거가 없으면 null(지어내지 않는다)
   총결제: number;
   체험여부: boolean;
   활성: boolean; // 현재 회원 = 지금 사용 가능한 수강권(잔여>0·미만료)을 하나라도 보유
@@ -47,11 +55,12 @@ function moneyOf(v: unknown): number {
   return Number(String(v ?? '').replace(/[^0-9.-]/g, '')) || 0;
 }
 
-type SortKey = '총결제' | '총사용' | '이름';
+type SortKey = '총결제' | '출석' | '총사용' | '이름';
 
 export default function MemberSummary() {
   const [memberRows, setMemberRows] = useState<MemberRecord[] | null>(null);
   const [salesRows, setSalesRows] = useState<MemberRecord[]>([]);
+  const [attRows, setAttRows] = useState<{ person_key: string; 출석수: unknown }[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const [q, setQ] = useState('');
@@ -64,20 +73,32 @@ export default function MemberSummary() {
     let alive = true;
     (async () => {
       try {
-        const [m, s] = await Promise.all([
+        const [m, s, a] = await Promise.all([
           // dedup_key: makePersonResolver 가 "동명이인 + 연락처 빈 행"을 행 단위로 구분하는 기준.
           fetchAllRows(
-            'dedup_key,이름,연락처,성별,수강권명,수강권종류,전체횟수,잔여횟수,등록일,수강권종료일',
+            // 수강권시작일: personUsedCount 가 재등록을 구분하는 기준. 빼면 재등록이 1건으로 접힌다.
+            'dedup_key,이름,연락처,성별,수강권명,수강권종류,전체횟수,잔여횟수,등록일,수강권시작일,수강권종료일',
           ),
           fetchAllRows(
             'dedup_key,이름,연락처,수강권명,수강권종류,결제구분,결제금액,결제일시',
             50000,
             SALES_TABLE,
           ).catch(() => [] as MemberRecord[]),
+          // 사람×사이트를 이미 합친 뷰라 수천 행 이하 — 한 번에 읽는다.
+          (async () => {
+            const { data, error } = await sb
+              .from('crm_attendance_person')
+              .select('person_key,출석수')
+              .order('person_key')
+              .limit(50000);
+            if (error) throw error;
+            return (data || []) as unknown as { person_key: string; 출석수: unknown }[];
+          })().catch(() => []),
         ]);
         if (!alive) return;
         setMemberRows(m);
         setSalesRows(s);
+        setAttRows(a);
       } catch (err) {
         if (alive) setError((err as Error).message || String(err));
       }
@@ -104,6 +125,7 @@ export default function MemberSummary() {
           members: [],
           sales: [],
           총사용: 0,
+          출석: null,
           총결제: 0,
           체험여부: false,
           활성: false,
@@ -124,6 +146,16 @@ export default function MemberSummary() {
        같은 잔여횟수를 각자 들기 때문이다(실측 583명 부풀림 · 최대 615회). */
     for (const p of map.values()) p.총사용 = personUsedCount(p.members);
 
+    /* 실측 출석 — person_key(이름⋮숫자연락처)를 같은 resolver 로 다시 풀어 붙인다.
+       송파 체험처럼 연락처 없이 잡힌 사이트('권인정⋮')도 그 이름의 연락처가 유일하면
+       같은 사람으로 합쳐진다. 회원(members)에 없는 키는 버린다(사람을 새로 만들지 않는다). */
+    for (const a of attRows) {
+      const [이름, 연락처 = ''] = String(a.person_key ?? '').split(KEY_SEP);
+      const p = map.get(keyOf({ 이름, 연락처 }));
+      if (!p) continue;
+      p.출석 = (p.출석 ?? 0) + toInt(a.출석수);
+    }
+
     for (const r of salesRows) {
       // 결제 내역은 회원(이름+연락처)에 붙인다. 매칭 안 되는 결제도 사람으로 남긴다.
       const p = get(r);
@@ -131,7 +163,7 @@ export default function MemberSummary() {
       p.총결제 += moneyOf(r['결제금액']);
     }
     return [...map.values()];
-  }, [memberRows, salesRows]);
+  }, [memberRows, salesRows, attRows]);
 
   const filtered = useMemo(() => {
     if (!people) return null;
@@ -150,6 +182,7 @@ export default function MemberSummary() {
     });
     out = out.sort((a, b) => {
       if (sort === '이름') return a.이름.localeCompare(b.이름, 'ko');
+      if (sort === '출석') return (b.출석 ?? -1) - (a.출석 ?? -1);
       return b[sort] - a[sort];
     });
     return out;
@@ -222,7 +255,8 @@ export default function MemberSummary() {
             onChange={(e) => setSort(e.target.value as SortKey)}
           >
             <option value="총결제">총 결제금액 많은순</option>
-            <option value="총사용">총 사용횟수 많은순</option>
+            <option value="출석">출석(실측) 많은순</option>
+            <option value="총사용">차감 횟수 많은순</option>
             <option value="이름">이름순</option>
           </select>
         </label>
@@ -250,7 +284,7 @@ export default function MemberSummary() {
           <div className="mb-[18px] grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-[14px]">
             <Stat label="전체 회원 수" value={fmtNum(totals.인원)} />
             <Stat label="현재 회원 (사용 가능)" value={fmtNum(totals.현재)} />
-            <Stat label="총 사용횟수 합" value={fmtNum(totals.총사용)} />
+            <Stat label="차감 횟수 합" value={fmtNum(totals.총사용)} />
             <Stat label="총 결제금액 합" value={`${fmtNum(totals.총결제)}원`} small />
           </div>
 
@@ -258,7 +292,7 @@ export default function MemberSummary() {
             <table className="w-full whitespace-nowrap border-collapse text-[13px]">
               <thead>
                 <tr>
-                  {['이름', '연락처', '보유 수강권', '총 사용횟수', '총 결제금액'].map((h) => (
+                  {['이름', '연락처', '보유 수강권', '출석(실측)', '차감 횟수', '총 결제금액'].map((h) => (
                     <th
                       key={h}
                       className="sticky top-0 border-b border-border bg-[#f7f8fa] px-3 py-[11px] text-left font-semibold"
@@ -271,7 +305,7 @@ export default function MemberSummary() {
               <tbody>
                 {!filtered.length ? (
                   <tr>
-                    <td colSpan={5}>
+                    <td colSpan={6}>
                       <div className="p-10 text-center text-sm text-muted">결과가 없습니다.</div>
                     </td>
                   </tr>
@@ -299,6 +333,9 @@ export default function MemberSummary() {
                       </td>
                       <td className="border-b border-[#eef0f4] px-3 py-[10px] text-muted">{p.연락처}</td>
                       <td className="border-b border-[#eef0f4] px-3 py-[10px]">{fmtNum(p.members.length)}개</td>
+                      <td className="border-b border-[#eef0f4] px-3 py-[10px] font-semibold">
+                        {p.출석 == null ? <span className="text-muted">—</span> : `${fmtNum(p.출석)}회`}
+                      </td>
                       <td className="border-b border-[#eef0f4] px-3 py-[10px]">{fmtNum(p.총사용)}회</td>
                       <td className="border-b border-[#eef0f4] px-3 py-[10px]">{fmtNum(p.총결제)}원</td>
                     </tr>
@@ -308,7 +345,8 @@ export default function MemberSummary() {
             </table>
           </div>
           <p className="mt-[14px] text-xs text-muted">
-            ※ 총 결제금액은 매출(sales) 기준, 총 사용횟수는 전체−잔여 합계입니다. 최근 최대 50,000행 기준.
+            ※ 출석(실측)은 스튜디오메이트 회원 페이지의 출석 수(전 지점 합)로, 야간 자동화가 읽은 회원만 있습니다(없으면 —).
+            차감 횟수는 수강권 등록건별 전체−잔여 합계라 결석·노쇼도 포함됩니다. 총 결제금액은 매출(sales) 기준.
           </p>
         </>
       )}
@@ -336,7 +374,11 @@ function DetailModal({ person, onClose }: { person: Person; onClose: () => void 
       </h3>
       <div className="mb-4 flex gap-[14px] text-[13px] text-muted">
         <span>
-          총 사용횟수 <strong className="text-text">{fmtNum(person.총사용)}회</strong>
+          출석(실측){' '}
+          <strong className="text-text">{person.출석 == null ? '—' : `${fmtNum(person.출석)}회`}</strong>
+        </span>
+        <span>
+          차감 횟수 <strong className="text-text">{fmtNum(person.총사용)}회</strong>
         </span>
         <span>
           총 결제금액 <strong className="text-text">{fmtNum(person.총결제)}원</strong>
@@ -349,7 +391,7 @@ function DetailModal({ person, onClose }: { person: Person; onClose: () => void 
           <table className="w-full whitespace-nowrap border-collapse text-[13px]">
             <thead>
               <tr>
-                {['수강권 종류', '수강권명', '전체', '잔여', '사용'].map((h) => (
+                {['수강권 종류', '수강권명', '시작일', '전체', '잔여', '사용'].map((h) => (
                   <th key={h} className="border-b border-border px-2 py-[8px] text-left font-semibold text-muted">
                     {h}
                   </th>
@@ -361,6 +403,7 @@ function DetailModal({ person, onClose }: { person: Person; onClose: () => void 
                 <tr key={i}>
                   <td className="border-b border-[#eef0f4] px-2 py-[8px]">{ticketType(m['수강권명'])}</td>
                   <td className="border-b border-[#eef0f4] px-2 py-[8px] text-muted">{m['수강권명']}</td>
+                  <td className="border-b border-[#eef0f4] px-2 py-[8px] text-muted">{String(m['수강권시작일'] ?? '')}</td>
                   <td className="border-b border-[#eef0f4] px-2 py-[8px]">{fmtNum(toInt(m['전체횟수']))}</td>
                   <td className="border-b border-[#eef0f4] px-2 py-[8px]">{fmtNum(toInt(m['잔여횟수']))}</td>
                   <td className="border-b border-[#eef0f4] px-2 py-[8px] font-semibold">{fmtNum(usedCount(m))}</td>
