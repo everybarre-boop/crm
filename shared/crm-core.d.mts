@@ -23,6 +23,8 @@ export function phoneDigits(v: unknown): string;
 /** 이름의 임시 표식('미수금' 등) 제거. SQL 짝은 public.norm_person_name(). */
 export function normPersonName(name: unknown): string;
 export function personKey(rec: Rec): string;
+/** 저장된 person_key 를 현재 정규화 규칙·resolver 로 다시 만든다. */
+export function rekeyPerson(storedKey: unknown, keyOf?: (rec: Rec) => string): string;
 export function makePersonResolver(
   ...rowSets: Array<readonly Rec[] | null | undefined>
 ): (rec: Rec) => string;

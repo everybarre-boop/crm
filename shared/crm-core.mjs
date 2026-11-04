@@ -98,6 +98,14 @@ const NAME_MARKERS = [
   /\s*(?:M\s*\d+\s*)?\d+\s*기(?=\s|$)/g,
   // 촬영X · 촬영x · 촬영 X — 한국어 이름에 '촬영'이 들어가는 경우는 없다
   /\s*촬영\s*[XxOo]?(?=\s|$)/g,
+  // 강아지X · 강아지 O — 반려견 동반 표식. 촬영과 같은 꼴.
+  /\s*강아지\s*[XxOo](?=\s|$)/g,
+  /* 금액 표식 "신예나 1184000" · "황○○ 80000원" · "진○○ 344,000" · "K○○ 78000 미수"
+     미수금 금액을 이름에 적어 둔 것(2026-11-04 · 고유 이름 18개). 4자리 이상이거나 천 단위
+     쉼표가 있는 숫자만 뗀다 — "체험1" 같은 자리 계정과 "M1 13기"의 숫자는 건드리지 않는다.
+     🔥 실사고: 청담 사이트 이름이 "신예나 1184000 미수금"이라 출석 460회가 '신예나 1184000'
+        으로 따로 묶여, 회원별 집계에서 통째로 빠졌다(실제 600회+ → 164회 표시). */
+  /\s*(?:\d{1,3}(?:,\d{3})+|\d{4,})\s*원?\s*(?:미수)?(?=\s|$)/g,
 ];
 
 export function normPersonName(name) {
@@ -418,6 +426,14 @@ export function slackEscape(s) {
      reservations 출석 행을 더해 메운다. 사이트를 구분해 더하지 않으면, 한 사이트만
      오래된 회원에게 다른 사이트의 출석까지 얹혀 이중 계수가 된다.
 
+   🔥 저장된 person_key 를 그대로 믿지 말 것 — **이름+연락처에서 keyOf 로 다시 만든다.**
+      · reservations.person_key 는 DB 생성 컬럼인데 이름을 **정규화하지 않는다**
+        ("신예나 미수금⋮…"). 그대로 조인하면 표식 붙은 회원의 기준일 이후 출석이 빠진다.
+      · crm_attendance.person_key 는 **쓸 때의** normPersonName 으로 만들어졌다. 정규화 규칙이
+        늘면(2026-11 금액 표식) 옛 행은 옛 키로 남아 같은 사람이 둘로 갈린다.
+      · 연락처 없이 잡힌 사이트('권인정⋮')도 keyOf(resolver) 를 거치면 그 이름의 유일한
+        연락처로 붙는다.
+
    ⛔️ 근거가 없으면 숫자를 지어내지 말 것. rows 가 없으면 null 을 돌려주고, 호출부는
       회차 멘트를 **보내지 않는다**(교차검증이 막으려는 바로 그 사고다).
 
@@ -428,6 +444,16 @@ export function slackEscape(s) {
    @param today         'YYYY-MM-DD' (KST)
    @returns (person_key) => { 출석, 확실, 사이트수, 기준일 } | null
    ---------------------------------------------------------------------- */
+/** 저장된 person_key(이름⋮숫자연락처)를 현재 정규화 규칙·resolver 로 다시 만든다. */
+export function rekeyPerson(storedKey, keyOf = personKey) {
+  const s = String(storedKey ?? '');
+  if (!s) return '';
+  const i = s.indexOf(KEY_SEP);
+  const 이름 = i < 0 ? s : s.slice(0, i);
+  const 연락처 = i < 0 ? '' : s.slice(i + 1);
+  return keyOf({ 이름, 연락처 });
+}
+
 export function makeAttendanceCounter({
   rows = [],
   reservations = [],
@@ -438,7 +464,7 @@ export function makeAttendanceCounter({
   // person → site → { 기준일, 출석수 }   (같은 사이트가 두 번 오면 최신 기준일이 이긴다)
   const byPerson = new Map();
   for (const r of rows) {
-    const k = String(r.person_key ?? '');
+    const k = rekeyPerson(r.person_key, keyOf);
     if (!k) continue;
     if (!byPerson.has(k)) byPerson.set(k, new Map());
     const bySite = byPerson.get(k);
@@ -454,7 +480,7 @@ export function makeAttendanceCounter({
   const 출석행 = new Map(); // `${person}\u0000${site}` → ['YYYY-MM-DD', ...]
   for (const v of reservations) {
     if (String(v.예약상태 ?? '') !== '출석') continue;
-    const k = String(v.person_key ?? '') || keyOf(v);
+    const k = v.이름 != null ? keyOf(v) : rekeyPerson(v.person_key, keyOf);
     if (!k) continue;
     const site = siteOfBranch(v.지점) || '';
     if (!site) continue; // 사이트를 모르면 더하지 않는다 — 지어내는 것보다 낫다

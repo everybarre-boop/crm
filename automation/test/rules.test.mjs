@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { DEFAULT_RULES, buildCrm, mergeRules, verifyMilestone } from '../../shared/crm-rules.mjs';
 import {
   dedupeTicketRows,
+  makeAttendanceCounter,
   makePersonResolver,
   normPersonName,
   personKey,
@@ -1190,4 +1191,51 @@ test('출석근거: attendanceRows 가 비면 옛 경로로 폴백한다 (도입
   assert.ok(m, '폴백 경로가 끊기면 도입 첫날 마일스톤이 통째로 사라진다');
   assert.equal(m.근거.근거출처, '차감횟수');
   assert.equal(r.stats.회차근거, '차감횟수');
+});
+
+/* 신예나 사고(2026-11-04) — 다지점 회원의 출석 수가 164회로 표시됐다(실제 600회+). */
+test('정규화: 이름의 금액·강아지 표식을 뗀다 (자리 계정·이름의 숫자는 그대로)', () => {
+  assert.equal(normPersonName('신예나 1184000 미수금'), '신예나');
+  assert.equal(normPersonName('황가라 80000원'), '황가라');
+  assert.equal(normPersonName('진가름24기 344,000미수금p'), '진가름');
+  assert.equal(normPersonName('Kasinda Lin 78000 미수'), 'Kasinda Lin');
+  assert.equal(normPersonName('윤가연 강아지X'), '윤가연');
+  assert.equal(normPersonName('체험1'), '체험1');
+  assert.equal(normPersonName('김미수'), '김미수');
+  assert.equal(normPersonName('김가정 M1 13기'), '김가정');
+});
+
+test('출석근거: 표식 붙은 옛 person_key·정규화 안 된 예약 키도 한 사람으로 합친다', () => {
+  const keyOf = makePersonResolver([mem({ 이름: '신예나', 연락처: '010-1111-2222' })]);
+  const cnt = makeAttendanceCounter({
+    rows: [
+      // 옛 규칙으로 저장된 키 — 금액 표식이 남아 있다
+      { person_key: '신예나 118400001011112222', site: 'everybarre', 기준일: TODAY, 출석수: 460 },
+      { person_key: '신예나01011112222', site: 'everybarre-gwanggyo', 기준일: '2026-07-01', 출석수: 71 },
+    ],
+    reservations: [
+      // reservations.person_key 는 이름을 정규화하지 않는다 — 이름+연락처로 다시 만들어야 붙는다
+      { person_key: '신예나 미수금01011112222', 이름: '신예나 미수금', 연락처: '010-1111-2222', 지점: '광교', 예약일자: '2026-07-10', 예약상태: '출석' },
+    ],
+    siteOfBranch: 사이트,
+    keyOf,
+    today: TODAY,
+  });
+  assert.equal(cnt(keyOf({ 이름: '신예나', 연락처: '010-1111-2222' }))?.출석, 460 + 71 + 1);
+});
+
+test('출석근거: 기준일 이후 가산은 그 사이트 출석만 (다른 사이트는 이미 기준선에 있다)', () => {
+  const cnt = makeAttendanceCounter({
+    rows: [
+      att({ site: 'everybarre', 기준일: TODAY, 출석수: 100 }),
+      att({ site: 'everybarre-gwanggyo', 기준일: '2026-07-01', 출석수: 10 }),
+    ],
+    reservations: [
+      { 이름: '홍길동', 연락처: '010-1111-2222', 지점: '청담', 예약일자: '2026-07-20', 예약상태: '출석' }, // 청담 기준선에 이미 있음
+      { 이름: '홍길동', 연락처: '010-1111-2222', 지점: '광교', 예약일자: '2026-07-20', 예약상태: '출석' },
+    ],
+    siteOfBranch: 사이트,
+    today: TODAY,
+  });
+  assert.equal(cnt(PK)?.출석, 100 + 10 + 1, '청담 출석이 광교 가산에 얹히면 이중 계수');
 });
