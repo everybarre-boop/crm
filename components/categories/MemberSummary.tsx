@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import * as XLSX from 'xlsx';
 import {
   fetchAllRows,
   fmtNum,
@@ -198,6 +199,31 @@ export default function MemberSummary() {
     };
   }, [filtered]);
 
+  /* 지금 화면에 보이는 목록(필터·정렬 적용 그대로)을 엑셀로 내려받는다.
+     숫자는 숫자 셀로 넣어 엑셀에서 바로 합계·정렬이 되게 한다. 문자열은 SheetJS 가
+     문자열 셀로 쓰므로 이름에 '=…' 이 있어도 수식으로 실행되지 않는다. */
+  function downloadXlsx() {
+    if (!filtered) return;
+    const data = filtered.map((p) => ({
+      이름: p.이름,
+      연락처: p.연락처,
+      상태: p.활성 ? '현재' : '비활성',
+      체험: p.체험여부 ? 'Y' : '',
+      지점: BRANCHES.filter((b) => p.members.some((m) => matchesBranch(m, b))).join(', '),
+      '보유 수강권': p.members.length,
+      '출석(실측)': p.출석 ?? '',
+      '차감 횟수': p.총사용,
+      '총 결제금액': p.총결제,
+    }));
+    const ws = XLSX.utils.json_to_sheet(data);
+    ws['!cols'] = [10, 15, 8, 6, 22, 11, 11, 10, 14].map((wch) => ({ wch }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '회원별 집계');
+    const d = new Date();
+    const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+    XLSX.writeFile(wb, `회원별집계_${branch || '전체'}_${ymd}.xlsx`);
+  }
+
   return (
     <>
       <div className="mb-[22px]">
@@ -270,6 +296,9 @@ export default function MemberSummary() {
           }}
         >
           필터 초기화
+        </button>
+        <button className={btn.ghostSm} disabled={!filtered?.length} onClick={downloadXlsx}>
+          엑셀 다운로드{filtered ? ` (${fmtNum(filtered.length)}명)` : ''}
         </button>
       </div>
 
