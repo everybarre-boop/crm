@@ -294,7 +294,7 @@ export async function fetchAttendanceFresh(today) {
 /** 규칙 평가에 넘길 행 전체. 사람×사이트 1행이라 members 보다 훨씬 작다. */
 export async function fetchAttendanceRows() {
   const sb = await getAdminClient();
-  return fetchAll(sb, T.attendance, 'person_key,site,회원id,이름,기준일,출석수,결석수', {
+  return fetchAll(sb, T.attendance, 'person_key,site,회원id,이름,기준일,출석수,결석수,연도기준일', {
     orderBy: ['id'],
   });
 }
@@ -352,9 +352,15 @@ export async function saveAttendance(rows, { dryRun }) {
     예약수: r.예약 ?? 0,
     전체수: r.전체 ?? 0,
     읽은시각: now,
+    // 연도별은 읽은 행에만 싣는다 — 안 읽은 행에 키를 넣으면 NULL 로 덮여 이전 값이 지워진다
+    ...(r.연도별 ? { 연도별출석: r.연도별, 연도기준일: r.기준일 } : {}),
   }));
+  // ⚠️ 한 upsert 묶음 안에서 컬럼 구성이 다르면 PostgREST 가 빠진 컬럼을 NULL 로 채운다.
+  //    연도별 있는 행 / 없는 행을 따로 보낸다.
+  const withYears = payload.filter((p) => '연도별출석' in p);
+  const without = payload.filter((p) => !('연도별출석' in p));
   let n = 0;
-  for (const part of chunk(payload)) {
+  for (const part of [...chunk(withYears), ...chunk(without)]) {
     const { data, error } = await sb
       .from(T.attendance)
       .upsert(part, { onConflict: 'site,회원id' })

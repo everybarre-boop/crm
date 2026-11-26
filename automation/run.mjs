@@ -32,7 +32,7 @@ import {
   fetchMemberSiteRows,
   saveReservations,
 } from './db.mjs';
-import { planAttendanceReads, readAttendancePlan } from './attcount.mjs';
+import { makeNeedsYears, planAttendanceReads, readAttendancePlan } from './attcount.mjs';
 import { buildAndSaveCrm, postCrmToSlack } from './crm.mjs';
 import { notifyOps } from './slack.mjs';
 import { branchOf, dateKST } from '../shared/crm-core.mjs';
@@ -318,6 +318,8 @@ async function stepAttendanceCount(rosterRows, today, dryRun) {
     ensureLogin,
     fresh: 이미,
     onSiteError: (site, err) => fail('attcount', site, err),
+    // 연도별은 아직 없는 회원만(대부분 처음 보는 회원) — 이미 있으면 뷰가 reservations 로 이어 센다
+    needsYears: makeNeedsYears(attendanceRows),
   });
   if (tot.skipped) console.log(`[attcount] 오늘 이미 읽어 건너뛴 회원 ${tot.skipped}명 (재실행 멱등)`);
   if (tot.notFound) {

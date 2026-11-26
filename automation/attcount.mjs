@@ -35,6 +35,19 @@ export function planAttendanceReads({ people, memberRows, attendanceRows, reread
     knownId.set(`${rekeyPerson(a.person_key, keyOf)}\u0000${a.site}`, String(a.회원id));
   }
 
+  /* 별칭 = 같은 사람으로 합쳐진 members 의 다른 이름들(개명 · 'M' 'MP' 같은 표식).
+     개명은 사이트마다 따로 반영돼서, 대표 이름('손소영M')으로만 확인하면 옛 이름이 남은 사이트
+     ('손소영')를 "다른 사람"으로 버린다(2026-11-26 일괄 보정에서 실측). */
+  const aliases = new Map();
+  for (const m of memberRows) {
+    const k = keyOf(m);
+    const n = String(m.이름 ?? '').trim();
+    if (!n) continue;
+    if (!aliases.has(k)) aliases.set(k, new Set());
+    aliases.get(k).add(n);
+  }
+  const 별칭Of = (p) => [...(aliases.get(keyOf(p)) || [])];
+
   const plan = new Map();
   const slot = (site) => {
     if (!plan.has(site)) plan.set(site, { byId: new Map(), toFind: [] });
@@ -42,7 +55,7 @@ export function planAttendanceReads({ people, memberRows, attendanceRows, reread
   };
   const done = new Set();
   const add = (site, 회원id, p) =>
-    slot(site).byId.set(회원id, { 회원id, 이름: p.이름 || '', person_key: personKey(p) });
+    slot(site).byId.set(회원id, { 회원id, 이름: p.이름 || '', 별칭: 별칭Of(p), person_key: personKey(p) });
 
   // 1) 예약자 행에서 이미 id 를 아는 사이트
   for (const p of people) {
@@ -61,7 +74,7 @@ export function planAttendanceReads({ people, memberRows, attendanceRows, reread
       const id = knownId.get(kk);
       if (id && !reread) continue;
       if (id) add(site, id, p);
-      else slot(site).toFind.push({ 이름: p.이름 || '', 연락처: p.연락처 || '', person_key: personKey(p) });
+      else slot(site).toFind.push({ 이름: p.이름 || '', 연락처: p.연락처 || '', 별칭: 별칭Of(p), person_key: personKey(p) });
     }
   }
   return plan;
@@ -73,14 +86,28 @@ export function personOfKey(pk) {
   return { 이름, 연락처 };
 }
 
+/** 연도별 출석을 아직 안 읽은 (site, 회원id) 를 가려내는 판정기.
+    crm_attendance 에 행이 없거나(처음 보는 회원) 연도기준일이 비어 있으면 읽어야 한다. */
+export function makeNeedsYears(attendanceRows) {
+  const has = new Set(
+    attendanceRows.filter((a) => a.연도기준일).map((a) => `${a.site}\u0000${a.회원id}`),
+  );
+  return (site, 회원id) => !has.has(`${site}\u0000${회원id}`);
+}
+
 /**
  * 계획대로 사이트별로 로그인 → (id 찾기) → 회원 페이지 읽기 → 저장.
  * 한 사이트가 통째로 실패해도 나머지는 계속한다(onSiteError 로 넘긴다).
  * 🔐 회원별 실패 로그에는 실명이 섞인다 — 콘솔(러너 로그)에만 남긴다. 슬랙엔 건수만.
+ * @param needsYears (site, 회원id) → bool — true 인 회원은 연도별 출석(이용내역 엑셀)까지 읽는다.
  */
-export async function readAttendancePlan(page, plan, { today, dryRun, ensureLogin, fresh = new Set(), onSiteError }) {
+export async function readAttendancePlan(
+  page,
+  plan,
+  { today, dryRun, ensureLogin, fresh = new Set(), onSiteError, needsYears = () => false },
+) {
   const { findMemberIds, scrapeMembers } = await import('./studiomate.mjs');
-  const tot = { read: 0, failed: 0, notFound: 0, skipped: 0 };
+  const tot = { read: 0, failed: 0, notFound: 0, skipped: 0, years: 0, yearsFailed: 0 };
 
   for (const [site, { byId, toFind }] of plan) {
     const isFresh = (id) => fresh.has(`${site}\u0000${id}`);
@@ -102,7 +129,11 @@ export async function readAttendancePlan(page, plan, { today, dryRun, ensureLogi
       }
       tot.notFound += 못찾음.length;
 
+      for (const t of todo) t.withYears = needsYears(site, t.회원id);
       const { rows, failures } = await scrapeMembers(page, site, todo);
+      const 연도실패 = rows.filter((r) => r.연도오류);
+      tot.years += rows.filter((r) => r.연도별).length;
+      tot.yearsFailed += 연도실패.length;
       const pkOf = new Map(todo.map((t) => [t.회원id, t.person_key]));
       const saved = await saveAttendance(
         rows.map((r) => ({ ...r, 기준일: today, person_key: pkOf.get(r.회원id) || '' })),
@@ -116,9 +147,11 @@ export async function readAttendancePlan(page, plan, { today, dryRun, ensureLogi
           (dryRun ? ' (dry-run · 저장 안 함)' : ` / 저장 ${saved}건`) +
           ` · ${((Date.now() - t0) / 1000).toFixed(0)}초` +
           (failures.length ? `  ⚠️ 읽기 실패 ${failures.length}명` : '') +
-          (못찾음.length ? `  ⚠️ id 못 찾음 ${못찾음.length}명` : ''),
+          (못찾음.length ? `  ⚠️ id 못 찾음 ${못찾음.length}명` : '') +
+          (연도실패.length ? `  ⚠️ 연도별 실패 ${연도실패.length}명` : ''),
       );
       for (const f of failures.slice(0, 5)) console.warn(`     · ${f.이름}: ${f.error.slice(0, 120)}`);
+      for (const f of 연도실패.slice(0, 5)) console.warn(`     · (연도별) ${f.이름}: ${f.연도오류.slice(0, 120)}`);
       for (const f of 못찾음.slice(0, 5)) console.warn(`     · (검색) ${f.이름}: ${f.error.slice(0, 120)}`);
     } catch (err) {
       onSiteError(site, err);

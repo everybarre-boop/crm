@@ -760,12 +760,90 @@ async function readHistoryCounts(page) {
   }, SELECTORS.member.historyCounts);
 }
 
+/* ==========================================================================
+   연도별 출석 — 이용내역 → 출석 탭 → 엑셀 다운로드 (앱 자체 기능)
+   --------------------------------------------------------------------------
+   화면 목록은 10건씩 페이지라 400회 회원이면 40번 넘겨야 하지만, 엑셀은 그 탭의 행을
+   통째로 준다(1.7초). API 를 직접 부르지 않는다 — 버튼을 누르고 받은 파일을 읽을 뿐이다.
+
+   ⚠️ 검증: **행 수 == 화면의 출석(N)** 이고 **전 행 최종상태 == 출석** 이어야 한다.
+      탭 전환이 늦어 '전체' 목록이 내려오면 취소·결석이 섞이고 행 수가 달라진다 → 한 번 더
+      기다렸다 재시도, 그래도 다르면 실패(연도별을 지어내지 않는다 — 출석 합계는 그대로 저장된다).
+   🔐 파일에는 회원 이름(파일명)·강사명이 있다 — 임시 경로에서 읽고 바로 지운다. 디스크에 남기지 않는다.
+   ========================================================================== */
+async function readYearlyAttendance(page, expected) {
+  if (expected === 0) return {};
+  const m = SELECTORS.member;
+  const XLSX = await import('xlsx');
+  const { readFile } = await import('node:fs/promises');
+
+  let last = '';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const clicked = await page.evaluate(
+      ({ sel, prefix }) => {
+        const el = [...document.querySelectorAll(sel)].find((e) =>
+          new RegExp(`^${prefix}\\s*\\(`).test((e.textContent || '').trim()),
+        );
+        if (!el) return false;
+        el.click();
+        return true;
+      },
+      { sel: m.historyCounts, prefix: m.historyAttendanceTabPrefix },
+    );
+    if (!clicked) throw new Error(`이용내역의 '${m.historyAttendanceTabPrefix}' 탭을 못 찾았습니다`);
+    await page.waitForTimeout(TIMING.memberSettle * (attempt + 2));
+
+    const [dl] = await Promise.all([
+      page.waitForEvent('download', { timeout: TIMING.waitTimeout }),
+      page.getByText(m.historyExcelText, { exact: true }).first().click(),
+    ]);
+    let rows;
+    try {
+      const wb = XLSX.read(await readFile(await dl.path()), { type: 'buffer' });
+      rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: null });
+    } finally {
+      await dl.delete().catch(() => {});
+    }
+
+    const head = (rows[0] || []).map((h) => String(h ?? '').trim());
+    const di = head.indexOf(m.historyExcelDateCol);
+    const si = head.indexOf(m.historyExcelStatusCol);
+    if (di < 0 || si < 0) {
+      throw new Error(`이용내역 엑셀 헤더가 바뀌었습니다: ${JSON.stringify(head)} — selectors.mjs 의 member.historyExcel* 확인`);
+    }
+    const body = rows.slice(1).filter((r) => r.some((v) => v != null && v !== ''));
+    const years = {};
+    let bad = 0;
+    for (const r of body) {
+      if (String(r[si] ?? '').trim() !== '출석') { bad++; continue; }
+      const v = r[di];
+      const y = typeof v === 'number'
+        ? XLSX.SSF.parse_date_code(v)?.y
+        : Number(String(v ?? '').trim().match(/^(\d{4})/)?.[1]);
+      if (!y) { bad++; continue; }
+      years[y] = (years[y] || 0) + 1;
+    }
+    if (!bad && body.length === expected) return years;
+    last = `엑셀 ${body.length}행(출석 아님·날짜 없음 ${bad}) ≠ 화면 출석(${expected})`;
+  }
+  throw new Error(`연도별 출석을 못 맞췄습니다 — ${last}`);
+}
+
+/* 이 사람으로 인정할 이름들(정규화). 이름 + 별칭.
+   🔥 개명(2026-11-26 손소영 → 손소영M)은 **사이트마다 따로** 반영된다 — 청담에서 바꿔도 반포·옥수
+      화면은 옛 이름이다. 별칭은 makePersonResolver 가 등록건 공유로 **같은 사람이라고 이미 증명한**
+      이름들만 넘어온다(attcount.mjs 의 planAttendanceReads). 아무 이름이나 받지 않는다. */
+function nameSet(t) {
+  return new Set([t.이름, ...(t.별칭 || [])].map((n) => normPersonName(n)).filter(Boolean));
+}
+
 /**
  * 회원 한 명의 출석 수를 읽는다.
- * @returns {{전체:number,예약:number,출석:number,결석:number,노쇼:number,취소:number,이름:string}}
- * @throws  위 ①②③ 중 하나라도 확인이 안 되면
+ * @param withYears  true 면 이용내역 엑셀로 연도별 출석도 읽는다(`연도별: {2025: n, …}`).
+ * @returns {{전체:number,예약:number,출석:number,결석:number,노쇼:number,취소:number,이름:string,연도별?:object}}
+ * @throws  위 ①②③ 중 하나라도 확인이 안 되면 (연도별 실패도 그 회원 실패로 본다)
  */
-export async function scrapeMemberAttendance(page, slug, 회원id, { 이름 = '' } = {}) {
+export async function scrapeMemberAttendance(page, slug, 회원id, { 이름 = '', 별칭 = [], withYears = false } = {}) {
   await page.goto(URLS.userDetail(slug, 회원id), { waitUntil: 'domcontentloaded' });
 
   // ① 이름이 채워질 때까지 기다린다(요소 존재만으로는 부족 — 내용은 응답 뒤에 그려진다)
@@ -776,7 +854,7 @@ export async function scrapeMemberAttendance(page, slug, 회원id, { 이름 = ''
     { timeout: TIMING.waitTimeout },
   );
   const 화면이름 = ((await text(page, nameSel)) || '').trim();
-  if (이름 && normPersonName(화면이름) !== normPersonName(이름)) {
+  if (이름 && !nameSet({ 이름, 별칭 }).has(normPersonName(화면이름))) {
     throw new Error(
       `회원 페이지가 다른 사람입니다 — 찾는 사람 "${이름}", 화면 "${화면이름}" (id=${회원id}). ` +
         `그대로 읽으면 남의 출석 수를 그 사람 것으로 저장한다.`,
@@ -827,6 +905,17 @@ export async function scrapeMemberAttendance(page, slug, 회원id, { 이름 = ''
     );
   }
 
+  // ④ 연도별(선택) — 실패해도 출석 합계는 살린다. 연도별만 비워 두고(NULL) 사유를 넘긴다.
+  let 연도별;
+  let 연도오류;
+  if (withYears) {
+    try {
+      연도별 = await readYearlyAttendance(page, c.출석 ?? 0);
+    } catch (err) {
+      연도오류 = String(err?.message ?? err);
+    }
+  }
+
   return {
     이름: 화면이름,
     전체: c.전체,
@@ -835,14 +924,16 @@ export async function scrapeMemberAttendance(page, slug, 회원id, { 이름 = ''
     결석: c.결석 ?? 0,
     노쇼: c.노쇼 ?? 0,
     취소: c.취소 ?? 0,
+    ...(withYears ? { 연도별, 연도오류 } : {}),
   };
 }
 
 /**
  * 여러 명을 순차로 읽는다. 한 명이 실패해도 나머지는 계속한다
  * (한 사람 때문에 그날 회차 근거가 통째로 비면 안 된다).
- * @param targets [{ 회원id, 이름 }]
+ * @param targets [{ 회원id, 이름, withYears? }] — withYears 인 회원만 연도별까지 읽는다.
  * @returns {{ rows: [], failures: [{회원id,이름,error}] }}
+ *          연도별만 실패한 회원은 rows 에 들어가고(연도별 없음) `연도오류` 가 붙는다.
  */
 export async function scrapeMembers(page, slug, targets, { onProgress } = {}) {
   const rows = [];
@@ -851,7 +942,11 @@ export async function scrapeMembers(page, slug, targets, { onProgress } = {}) {
   for (const t of targets) {
     i++;
     try {
-      const r = await scrapeMemberAttendance(page, slug, t.회원id, { 이름: t.이름 });
+      const r = await scrapeMemberAttendance(page, slug, t.회원id, {
+        이름: t.이름,
+        별칭: t.별칭,
+        withYears: !!t.withYears,
+      });
       rows.push({ 회원id: String(t.회원id), site: slug, ...r });
     } catch (err) {
       failures.push({ 회원id: String(t.회원id), 이름: t.이름 || '', error: String(err?.message ?? err) });
@@ -904,14 +999,14 @@ export async function findMemberIds(page, slug, targets) {
 
   for (const t of targets) {
     const phone = String(t.연락처 ?? '').replace(/\D/g, '');
-    const name = normPersonName(t.이름);
+    const names = nameSet(t);
     try {
       if (!phone) throw new Error('연락처가 없어 검색하지 않습니다(이름만으로는 검증할 수 없다)');
       const list = await searchMembers(page, phone);
       const hits = list.filter(
         (m) =>
           String(m?.mobile ?? '').replace(/\D/g, '') === phone &&
-          normPersonName(m?.name) === name &&
+          names.has(normPersonName(m?.name)) &&
           m?.id != null,
       );
       if (hits.length !== 1) {
