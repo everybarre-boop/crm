@@ -303,7 +303,7 @@ export async function fetchAttendanceRows() {
     dedup_key 는 makePersonResolver 가 동명이인 + 연락처 빈 행을 가르는 데 필요하다. */
 export async function fetchMemberSiteRows() {
   const sb = await getAdminClient();
-  return fetchAll(sb, T.members, 'dedup_key,이름,연락처,수강권명');
+  return fetchAll(sb, T.members, 'dedup_key,이름,연락처,수강권명,수강권시작일,결제일시');
 }
 
 /* 기준일 이후 보정용 예약 행.

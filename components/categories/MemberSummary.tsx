@@ -78,7 +78,8 @@ export default function MemberSummary() {
           // dedup_key: makePersonResolver 가 "동명이인 + 연락처 빈 행"을 행 단위로 구분하는 기준.
           fetchAllRows(
             // 수강권시작일: personUsedCount 가 재등록을 구분하는 기준. 빼면 재등록이 1건으로 접힌다.
-            'dedup_key,이름,연락처,성별,수강권명,수강권종류,전체횟수,잔여횟수,등록일,수강권시작일,수강권종료일',
+            // 결제일시: makePersonResolver 가 개명('손소영' → '손소영M')을 등록건 공유로 알아보는 근거.
+            'dedup_key,이름,연락처,성별,수강권명,수강권종류,전체횟수,잔여횟수,등록일,수강권시작일,수강권종료일,결제일시',
           ),
           fetchAllRows(
             'dedup_key,이름,연락처,수강권명,수강권종류,결제구분,결제금액,결제일시',
@@ -121,7 +122,9 @@ export default function MemberSummary() {
       if (!p) {
         p = {
           key: k,
-          이름: String(rec['이름'] ?? '').trim(),
+          // 키의 이름 = 대표 이름(개명했으면 지금 이름 · 미수금 같은 표식은 뗀 것). 첫 행의
+          // 이름을 쓰면 옛 이름('손소영')이 보일 수 있다.
+          이름: k.split(KEY_SEP)[0] || String(rec['이름'] ?? '').trim(),
           연락처: String(rec['연락처'] ?? ''),
           members: [],
           sales: [],

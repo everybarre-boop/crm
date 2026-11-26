@@ -137,10 +137,24 @@ export function personKey(rec) {
       쪼개는 기준은 dedup_key → 없으면 행 객체별 일련번호(같은 조회 안에서만 유효).
       **집계용 조회에는 되도록 dedup_key 를 select 에 포함시킬 것.**
 
+   🔥 개명·표식 변경 — 같은 연락처의 다른 이름이 **같은 등록건을 공유하면** 한 사람이다.
+      실사고(2026-11-26 손소영): 스튜디오메이트에서 '손소영M' 으로 바꾸자 다음 업로드가 전 이력을
+      새 이름으로 다시 내보냈다. dedup_key 에 이름이 있어 옛 '손소영' 행은 그대로 남고, 두 이름이
+      두 사람으로 갈려 옛 이름 쪽이 **만료 회원**으로 표시됐다(최신 수강권은 새 이름 쪽에만 있다).
+      실측 66개 연락처: 'M'·'P'·'MP'·'전액M'·'312,000M' 같은 변형은 등록건을 50~100% 공유하고,
+      가족으로 보이는 다른 이름은 대부분 0% 공유한다.
+      → 규칙: 같은 연락처 · 공유 등록건(수강권명+수강권시작일+결제일시) ≥ 1 · 적은 쪽의 절반 이상.
+        표식 목록(NAME_MARKERS)에 'M'·'P' 를 넣지 않은 건 일부러다 — 뜻을 모르는 낱글자를
+        떼면 같은 번호를 쓰는 가족이 뭉칠 수 있다. 등록건 공유는 데이터가 직접 말해 주는 근거다.
+      대표 이름 = 가장 최근 등록건(수강권시작일 → 결제일시)을 가진 이름(= 지금 이름).
+      ⚠️ 근거는 수강권시작일이 있는 행에서만 나온다 — 회원 행을 넘기지 않는 호출부(roster·sales
+         만 넘김)는 합치지 못한다. 결제일시도 select 해야 근거가 정확하다(없으면 빈 값으로 비교).
+
    사용법: const keyOf = makePersonResolver(memberRows, salesRows); keyOf(rec)
    ---------------------------------------------------------------------- */
 export function makePersonResolver(...rowSets) {
   const phonesByName = new Map();
+  const regsByPhone = new Map(); // 연락처 → 이름 → { regs: Set, latest }
   for (const rows of rowSets) {
     if (!rows) continue;
     for (const r of rows) {
@@ -151,8 +165,54 @@ export function makePersonResolver(...rowSets) {
       let set = phonesByName.get(name);
       if (!set) phonesByName.set(name, (set = new Set()));
       set.add(ph);
+
+      const start = String(r['수강권시작일'] ?? '').trim();
+      if (!start) continue;
+      const paid = String(r['결제일시'] ?? '').trim();
+      let byName = regsByPhone.get(ph);
+      if (!byName) regsByPhone.set(ph, (byName = new Map()));
+      let e = byName.get(name);
+      if (!e) byName.set(name, (e = { regs: new Set(), latest: '' }));
+      e.regs.add(String(r['수강권명'] ?? '') + KEY_SEP + start + KEY_SEP + paid);
+      const rank = start + KEY_SEP + paid;
+      if (rank > e.latest) e.latest = rank;
     }
   }
+
+  // 연락처별로 등록건을 공유하는 이름끼리 묶고(union-find), 대표 이름을 정한다
+  const alias = new Map(); // `${이름}\0${연락처}` → 대표 이름
+  for (const [ph, byName] of regsByPhone) {
+    if (byName.size < 2) continue;
+    const names = [...byName.keys()];
+    const parent = new Map(names.map((n) => [n, n]));
+    const find = (n) => (parent.get(n) === n ? n : find(parent.get(n)));
+    for (let i = 0; i < names.length; i++) {
+      for (let j = i + 1; j < names.length; j++) {
+        const a = byName.get(names[i]).regs;
+        const b = byName.get(names[j]).regs;
+        const [small, big] = a.size <= b.size ? [a, b] : [b, a];
+        let shared = 0;
+        for (const x of small) if (big.has(x)) shared++;
+        if (shared >= 1 && shared * 2 >= small.size) parent.set(find(names[i]), find(names[j]));
+      }
+    }
+    const groups = new Map();
+    for (const n of names) {
+      const root = find(n);
+      if (!groups.has(root)) groups.set(root, []);
+      groups.get(root).push(n);
+    }
+    for (const g of groups.values()) {
+      if (g.length < 2) continue;
+      const rep = g.reduce((best, n) => {
+        const d = byName.get(n).latest.localeCompare(byName.get(best).latest);
+        return d > 0 || (d === 0 && n < best) ? n : best;
+      });
+      for (const n of g) if (n !== rep) alias.set(n + '\u0000' + ph, rep);
+    }
+  }
+  const named = (name, ph) => (alias.get(name + '\u0000' + ph) ?? name) + KEY_SEP + ph;
+
   // 판정 불가 행에 줄 일련번호(dedup_key 가 없을 때만). 행 객체 기준이라 같은 행을
   // 여러 번 물어봐도 같은 키가 나온다.
   const fallbackIds = new WeakMap();
@@ -160,9 +220,9 @@ export function makePersonResolver(...rowSets) {
   return (rec) => {
     const name = normPersonName(rec['이름']);
     const ph = phoneDigits(rec['연락처']);
-    if (ph) return name + KEY_SEP + ph;
+    if (ph) return named(name, ph);
     const set = phonesByName.get(name);
-    if (set && set.size === 1) return name + KEY_SEP + [...set][0]; // 유일하니 그 사람으로
+    if (set && set.size === 1) return named(name, [...set][0]); // 유일하니 그 사람으로
     if (!set) return name + KEY_SEP + ''; // 이 이름엔 연락처가 아예 없다 → 이름으로 묶는다
     // 동명이인 + 연락처 빈 행 — 누구인지 알 수 없으므로 다른 사람과 절대 합치지 않는다.
     const dk = String(rec['dedup_key'] ?? '');

@@ -76,7 +76,7 @@ export default function Members() {
         // dedup_key 도 받는다 — makePersonResolver 가 "동명이인 + 연락처 빈 행"을
         // 행 단위로 구분하는 기준이고, 표/요약과 같은 키를 얻으려면 양쪽에 있어야 한다.
         const all = await fetchAllRows(
-          'dedup_key,이름,연락처,전체횟수,잔여횟수,수강권명,수강권시작일',
+          'dedup_key,이름,연락처,전체횟수,잔여횟수,수강권명,수강권시작일,결제일시',
         );
         if (!alive) return;
         const keyOf = makePersonResolver(all);

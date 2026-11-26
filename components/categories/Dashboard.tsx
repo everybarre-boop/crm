@@ -176,7 +176,7 @@ export default function Dashboard() {
           // 수강권시작일 = 등록일이 빈 경우의 대체 기준(regDate). 둘 다 받아야 한다.
           // dedup_key: makePersonResolver 가 "동명이인 + 연락처 빈 행"을 행 단위로 구분하는 기준.
           fetchAllRows(
-            'dedup_key,이름,연락처,성별,수강권명,수강권종류,등록일,수강권시작일,전체횟수,잔여횟수',
+            'dedup_key,이름,연락처,성별,수강권명,수강권종류,등록일,수강권시작일,전체횟수,잔여횟수,결제일시',
           ),
           fetchAllRows('dedup_key,이름,연락처,수강권명,결제금액,결제일시', 50000, SALES_TABLE).catch(
             () => [] as MemberRecord[],

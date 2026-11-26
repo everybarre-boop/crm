@@ -21,6 +21,7 @@ import {
   normPersonName,
   personKey,
   pickTicketRow,
+  rekeyPerson,
   renderTemplate,
   ticketKey,
   ticketSitesByPerson,
@@ -279,10 +280,12 @@ export function verifyMilestone({ audit, 관측출석 = 0, 관측시작 = null }
       (21:00 실패 → 22:00 재실행이 안전해야 한다)
    재발송억제일수: 0=억제 없음 / -1=평생 1회 / n=최근 n일 안에 보냈으면 억제
    ---------------------------------------------------------------------- */
-function makeSuppressor(sentHistory, targetDate) {
+/* ⚠️ 저장된 person_key 는 **보낸 날의** 이름 기준이다. 개명·표식 변경이 있으면 지금의 대표 키와
+   달라져 "평생 1회" 마일스톤이 다시 나간다 → keyOf 로 다시 만든다(rekeyPerson). */
+function makeSuppressor(sentHistory, targetDate, keyOf) {
   const byKey = new Map(); // `${person}\u0000${rule}\u0000${규칙키}` → [대상일자...]
   for (const s of sentHistory || []) {
-    const k = `${s.person_key}\u0000${s.rule_id}\u0000${s.규칙키 ?? ''}`;
+    const k = `${rekeyPerson(s.person_key, keyOf)}\u0000${s.rule_id}\u0000${s.규칙키 ?? ''}`;
     if (!byKey.has(k)) byKey.set(k, []);
     byKey.get(k).push(s.대상일자);
   }
@@ -346,11 +349,11 @@ export function buildCrm({
   const R = ruleMap(rules);
   const warnings = [];
   const messages = [];
-  const suppressed = makeSuppressor(sentHistory, targetDate);
 
   /* 동일인 판정 — 세 데이터셋을 한 resolver 에 넣어야 같은 기준으로 묶인다.
      (판교 이가원 · 반포 이가원이 한 사람이 되는 자리) */
   const keyOf = makePersonResolver(memberRows, rosterRows, lastAttendance);
+  const suppressed = makeSuppressor(sentHistory, targetDate, keyOf);
 
   // 사람별 members 행
   const memByPerson = new Map();
