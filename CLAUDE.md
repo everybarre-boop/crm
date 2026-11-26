@@ -518,6 +518,10 @@ CSV 는 Excel 열람을 전제하므로 `=` `+` `-` `@` 로 시작하는 셀 값
 - 사용자 입력을 PostgREST 필터(`.or()` 등)에 넣을 때는 필터 구문 특수문자를 제거한다.
   [lib/members.ts](lib/members.ts)의 `sanitizeSearchTerm()`를 쓸 것. 검색 로직 참고:
   [components/categories/Members.tsx](components/categories/Members.tsx)의 `load()`.
+- 🔥 **Supabase 조회는 한 번에 최대 1,000행이다 — `.limit(50000)` 은 조용히 1,000행에서 잘린다.**
+  에러가 없어서 못 알아챈다. 1,000행을 넘을 수 있는 조회는 `.order()` + `.range()` 로 페이지를
+  나눠 다 읽을 것(`fetchAllRows` 또는 같은 루프). 실사고(2026-11-26 회원별 집계): 출석(실측)이
+  가나다순 '김상희' 까지만 읽혀 7,899명 중 6,899명이 '—' 로 보였다.
 - 화면 상태(로그인/앱, 카테고리 전환)는 React 상태·`location.hash`로 관리한다.
 - 새 화면은 [components/categories/](components/categories/)에 컴포넌트를 만들고
   [lib/categories.ts](lib/categories.ts)의 `CATEGORIES` 배열에 등록한다.

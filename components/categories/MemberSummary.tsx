@@ -125,16 +125,13 @@ export default function MemberSummary() {
             50000,
             SALES_TABLE,
           ).catch(() => [] as MemberRecord[]),
-          // 사람×사이트를 이미 합친 뷰라 수천 행 이하 — 한 번에 읽는다.
-          (async () => {
-            const { data, error } = await sb
-              .from('crm_attendance_person')
-              .select('person_key,출석수')
-              .order('person_key')
-              .limit(50000);
-            if (error) throw error;
-            return (data || []) as unknown as { person_key: string; 출석수: unknown }[];
-          })().catch(() => []),
+          /* 🔥 페이지로 나눠 읽는다. `.limit(50000)` 한 번이면 서버 상한(1,000행)에서 조용히 잘려
+             가나다순 '김상희' 이후 6,899명(7,899명 중)의 출석이 전부 '—' 로 보였다(2026-11-26). */
+          readAll<{ person_key: string; 출석수: unknown }>(
+            'crm_attendance_person',
+            'person_key,출석수',
+            ['person_key'],
+          ).catch(() => []),
           // 연도별이 없으면(SQL 미적용 등) 빈 배열 → 전원 '—'. 지어내지 않는다.
           readAll<{ person_key: string; 연도: unknown; 출석수: unknown }>(
             'crm_attendance_person_yearly',

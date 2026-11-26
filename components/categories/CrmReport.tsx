@@ -104,19 +104,29 @@ export default function CrmReport() {
   const load = useCallback(async () => {
     setRefreshing(true);
     try {
+      /* 페이지로 나눠 읽는다 — `.limit(20000)` 한 번은 서버 상한(1,000행)에서 조용히 잘린다
+         (월 ~270건이라 연 단위 기간이면 넘는다). */
+      const readMsgs = async () => {
+        const out: Msg[] = [];
+        for (let i = 0; ; i += 1000) {
+          const { data, error } = await sb
+            .from(CRM_MSG_TABLE)
+            .select('id,대상일자,지점,이름,연락처,rule_id,발송여부,발송오류,실행여부,반응')
+            .gte('대상일자', from)
+            .lte('대상일자', to)
+            .order('id', { ascending: true })
+            .range(i, i + 999);
+          if (error) throw error;
+          out.push(...((data || []) as unknown as Msg[]));
+          if (!data || data.length < 1000) return out;
+        }
+      };
       const [m, r] = await Promise.all([
-        sb
-          .from(CRM_MSG_TABLE)
-          .select('id,대상일자,지점,이름,연락처,rule_id,발송여부,발송오류,실행여부,반응')
-          .gte('대상일자', from)
-          .lte('대상일자', to)
-          .order('id', { ascending: true })
-          .limit(20000),
+        readMsgs(),
         sb.from(CRM_RULE_TABLE).select('*').order('정렬순서', { ascending: true }),
       ]);
-      if (m.error) throw m.error;
       if (r.error) throw r.error;
-      setMsgs((m.data as unknown as Msg[]) || []);
+      setMsgs(m);
       setRules((r.data as CrmRule[]) || []);
       setError(null);
     } catch (err) {
