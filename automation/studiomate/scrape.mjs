@@ -860,3 +860,71 @@ export async function scrapeMembers(page, slug, targets, { onProgress } = {}) {
   }
   return { rows, failures };
 }
+
+/* ==========================================================================
+   회원 id 찾기 — 예약이 없는 사이트에서 (상단 검색창 → 앱이 받은 응답을 읽는다)
+   --------------------------------------------------------------------------
+   🔥 회원 id 는 사이트마다 다르고, 지금까지는 예약자 행에서만 얻었다. 그래서 출석 수는
+      **내일 예약이 잡힌 사이트**에서만 읽혔고, 예전에 다닌 사이트의 출석은 합계에서 통째로
+      빠졌다(2026-11-26 임동우 · 125명). 이 함수가 그 나머지 사이트의 id 를 찾는다.
+
+   ⚠️ 매칭은 **연락처(숫자) 일치 + 정규화한 이름 일치** 둘 다다. 가족이 연락처를 같이 쓰는
+      경우가 있어 연락처만으로는 다른 사람을 고를 수 있고, 이름만으로는 동명이인이 있다.
+      후보가 0명이거나 2명 이상이면 **실패**로 남긴다(고르지 않는다 — 남의 출석을 붙이느니 빈다).
+      연락처가 없는 사람은 검색하지 않는다(이름만으로는 검증할 수 없다).
+   ========================================================================== */
+async function searchMembers(page, query) {
+  const input = page.locator(SELECTORS.search.input).first();
+  await input.fill('');
+  const resp = page.waitForResponse(
+    (r) =>
+      SELECTORS.search.responseUrl.test(r.url()) &&
+      new URL(r.url()).searchParams.get('search_word') === query,
+    { timeout: TIMING.waitTimeout },
+  );
+  // fill() 은 검색을 트리거하지 않는다(실측) — 키 입력이어야 앱이 요청을 보낸다
+  await input.pressSequentially(query, { delay: 30 });
+  const r = await resp;
+  if (!r.ok()) throw new Error(`회원 검색 응답 ${r.status()}`);
+  const body = await r.json();
+  if (!Array.isArray(body)) throw new Error('회원 검색 응답 형식이 바뀌었습니다 (배열이 아님)');
+  return body;
+}
+
+/**
+ * @param targets [{ 이름, 연락처, ...그대로 돌려줄 필드 }]
+ * @returns {{ found: [{ ...target, 회원id }], failures: [{ 이름, error }] }}
+ */
+export async function findMemberIds(page, slug, targets) {
+  const found = [];
+  const failures = [];
+  if (!targets.length) return { found, failures };
+  await page.goto(URLS.users(slug), { waitUntil: 'domcontentloaded' });
+  await page.locator(SELECTORS.search.input).first().waitFor({ timeout: TIMING.waitTimeout });
+
+  for (const t of targets) {
+    const phone = String(t.연락처 ?? '').replace(/\D/g, '');
+    const name = normPersonName(t.이름);
+    try {
+      if (!phone) throw new Error('연락처가 없어 검색하지 않습니다(이름만으로는 검증할 수 없다)');
+      const list = await searchMembers(page, phone);
+      const hits = list.filter(
+        (m) =>
+          String(m?.mobile ?? '').replace(/\D/g, '') === phone &&
+          normPersonName(m?.name) === name &&
+          m?.id != null,
+      );
+      if (hits.length !== 1) {
+        throw new Error(
+          hits.length
+            ? `같은 이름·연락처 회원이 ${hits.length}명입니다 — 고르지 않습니다`
+            : `이 사이트에서 회원을 못 찾았습니다 (검색 결과 ${list.length}명 중 이름·연락처 일치 0)`,
+        );
+      }
+      found.push({ ...t, 회원id: String(hits[0].id) });
+    } catch (err) {
+      failures.push({ 이름: t.이름 || '', error: String(err?.message ?? err) });
+    }
+  }
+  return { found, failures };
+}

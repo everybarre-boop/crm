@@ -8,6 +8,12 @@
 //
 // 기존 import 경로(`./studiomate.mjs`)를 유지하기 위해 여기서 re-export 만 한다.
 // ============================================================================
-export { loginStudioMate, scrapeBranch, scrapeMemberAttendance, scrapeMembers } from './studiomate/scrape.mjs';
+export {
+  findMemberIds,
+  loginStudioMate,
+  scrapeBranch,
+  scrapeMemberAttendance,
+  scrapeMembers,
+} from './studiomate/scrape.mjs';
 export { toAttendanceRecords, toReservationRecord } from './studiomate/normalize.mjs';
 export { selectorsReady, SELECTORS, URLS } from './studiomate/selectors.mjs';

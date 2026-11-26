@@ -23,6 +23,7 @@ import {
   pickTicketRow,
   renderTemplate,
   ticketKey,
+  ticketSitesByPerson,
   toInt,
   usageAudit,
   usedCount,
@@ -392,6 +393,8 @@ export function buildCrm({
     siteOfBranch,
     keyOf,
     today,
+    // 수강권이 있는데 출석 행이 없는 사이트가 있으면 확실=false — 그 사이트 출석이 통째로 빠진 값이다
+    expectedSites: ticketSitesByPerson(memberRows, siteOfBranch, keyOf),
   });
 
   /* ── 예약자 정리 ────────────────────────────────────────────────────
@@ -509,7 +512,11 @@ export function buildCrm({
                보내지 않는다(다음 실행에서 다시 읽으면 풀린다).
              · 옛 경로: 예전 교차검증 그대로(members ↔ reservations 모순 확인). */
           const 검증 = 출석근거있음
-            ? (att.확실 ? null : `출석 기록이 오늘 값이 아닙니다 (기준일 ${att.기준일})`)
+            ? att.누락사이트.length
+              ? `수강권이 있는 사이트의 출석 기록이 없습니다 (${att.누락사이트.join(', ')})`
+              : att.확실
+                ? null
+                : `출석 기록이 오늘 값이 아닙니다 (기준일 ${att.기준일})`
             : p.교차검증 === false
               ? null
               : verifyMilestone({ audit, 관측출석, 관측시작 });

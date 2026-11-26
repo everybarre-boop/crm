@@ -26,10 +26,16 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { BRANCHES, SITES, env, preflight, siteOfBranch } from './config.mjs';
 import { applyAttendance } from './apply.mjs';
-import { fetchAttendanceFresh, saveAttendance, saveReservations } from './db.mjs';
+import {
+  fetchAttendanceFresh,
+  fetchAttendanceRows,
+  fetchMemberSiteRows,
+  saveReservations,
+} from './db.mjs';
+import { planAttendanceReads, readAttendancePlan } from './attcount.mjs';
 import { buildAndSaveCrm, postCrmToSlack } from './crm.mjs';
 import { notifyOps } from './slack.mjs';
-import { branchOf, dateKST, personKey } from '../shared/crm-core.mjs';
+import { branchOf, dateKST } from '../shared/crm-core.mjs';
 import { toAttendanceRecords, toReservationRecord } from './studiomate/normalize.mjs';
 
 const OUT_DIR = 'automation/out';
@@ -273,6 +279,9 @@ async function stepRoster(tomorrow, dryRun) {
 
    ⚠️ 대상은 **내일 예약자**뿐이다. 전 회원(5,000명)을 읽으면 몇 시간이 걸린다.
    ⚠️ 사이트별로 읽는다 — 회원 id 가 사이트마다 다르고, 출석 수도 사이트별이다.
+   🔥 예약 사이트만이 아니라 그 사람이 **수강권을 가진 모든 사이트**를 읽는다(2026-11-26
+      임동우 사고 — 예전에 다닌 사이트 출석이 합계에서 통째로 빠졌다). id 를 모르는 사이트는
+      검색으로 찾는다. 계획·실행은 attcount.mjs.
    ⚠️ 재실행(22:30 예비)에서는 오늘 이미 읽은 (사이트,회원id) 를 건너뛴다.
    ========================================================================== */
 async function stepAttendanceCount(rosterRows, today, dryRun) {
@@ -281,63 +290,42 @@ async function stepAttendanceCount(rosterRows, today, dryRun) {
     return { read: 0, failed: 0 };
   }
 
-  /* 사이트별 대상 — 같은 사람이 내일 여러 수업이어도 한 번만 읽는다.
-     예약대기·취소도 포함해서 읽는다: 회차를 아는 건 해롭지 않고, 다음날 대상이 될 수 있다. */
-  const bySite = new Map();
+  /* 예약대기·취소도 포함해서 읽는다: 회차를 아는 건 해롭지 않고, 다음날 대상이 될 수 있다. */
   let noId = 0;
-  for (const r of rosterRows) {
-    const id = String(r.회원id ?? '').trim();
-    if (!id) { noId++; continue; }
+  const people = rosterRows.map((r) => {
+    const 회원id = String(r.회원id ?? '').trim();
     const site = siteOfBranch(r.지점);
-    if (!site) { noId++; continue; }
-    if (!bySite.has(site)) bySite.set(site, new Map());
-    bySite.get(site).set(id, { 회원id: id, 이름: r.이름 || '', person_key: personKey(r) });
-  }
+    if (!회원id || !site) noId++;
+    return { 이름: r.이름 || '', 연락처: r.연락처 || '', site, 회원id };
+  });
   if (noId) {
     console.warn(
-      `  ⚠️ 회원 id 를 못 얻은 예약 ${noId}건 — 그 회원은 마일스톤 회차를 확정할 수 없습니다 ` +
-        `(selectors.mjs 의 MEMBER_ID_VUE_PATH 확인).`,
+      `  ⚠️ 회원 id 를 못 얻은 예약 ${noId}건 — 그 사이트는 검색으로 찾습니다 ` +
+        `(계속 늘면 selectors.mjs 의 MEMBER_ID_VUE_PATH 확인).`,
     );
   }
 
-  const 이미 = dryRun ? new Set() : await fetchAttendanceFresh(today);
-  const { scrapeMembers } = await import('./studiomate.mjs');
+  const [memberRows, attendanceRows, 이미] = await Promise.all([
+    fetchMemberSiteRows(),
+    fetchAttendanceRows(),
+    dryRun ? new Set() : fetchAttendanceFresh(today),
+  ]);
+  const plan = planAttendanceReads({ people, memberRows, attendanceRows });
   const page = await getPage();
-  let read = 0;
-  let failed = 0;
-  let 건너뜀 = 0;
-
-  for (const [site, targets] of bySite) {
-    const todo = [...targets.values()].filter((t) => !이미.has(`${site}\u0000${t.회원id}`));
-    건너뜀 += targets.size - todo.length;
-    if (!todo.length) {
-      console.log(`[attcount] ${site}: ${targets.size}명 전부 오늘 이미 읽음 — 건너뜀`);
-      continue;
-    }
-    try {
-      await ensureLogin(page, site);
-      const t0 = Date.now();
-      const { rows, failures } = await scrapeMembers(page, site, todo);
-      const saved = await saveAttendance(
-        rows.map((r) => ({ ...r, 기준일: today, person_key: targets.get(r.회원id)?.person_key || '' })),
-        { dryRun },
-      );
-      read += rows.length;
-      failed += failures.length;
-      console.log(
-        `[attcount] ${site}: ${todo.length}명 중 ${rows.length}명 읽음` +
-          (dryRun ? ' (dry-run · 저장 안 함)' : ` / 저장 ${saved}건`) +
-          ` · ${((Date.now() - t0) / 1000).toFixed(0)}초` +
-          (failures.length ? `  ⚠️ 실패 ${failures.length}명` : ''),
-      );
-      /* 🔐 실패 로그에는 실명이 섞인다 — 콘솔(러너 로그)에만 남기고 슬랙엔 건수만 나간다. */
-      for (const f of failures.slice(0, 5)) console.warn(`     · ${f.이름}: ${f.error.slice(0, 120)}`);
-    } catch (err) {
-      fail('attcount', site, err);
-    }
+  const tot = await readAttendancePlan(page, plan, {
+    today,
+    dryRun,
+    ensureLogin,
+    fresh: 이미,
+    onSiteError: (site, err) => fail('attcount', site, err),
+  });
+  if (tot.skipped) console.log(`[attcount] 오늘 이미 읽어 건너뛴 회원 ${tot.skipped}명 (재실행 멱등)`);
+  if (tot.notFound) {
+    console.warn(
+      `  ⚠️ 수강권이 있는 사이트에서 회원 id 를 못 찾은 ${tot.notFound}건 — 그 회원의 마일스톤은 보류됩니다.`,
+    );
   }
-  if (건너뜀) console.log(`[attcount] 오늘 이미 읽어 건너뛴 회원 ${건너뜀}명 (재실행 멱등)`);
-  return { read, failed };
+  return tot;
 }
 
 /* ==========================================================================

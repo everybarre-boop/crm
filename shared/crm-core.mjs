@@ -442,8 +442,30 @@ export function slackEscape(s) {
    @param siteOfBranch  (지점) => site slug. 지점→사이트 매핑(config.mjs 의 SITES).
    @param keyOf         행 → person_key. 안 주면 personKey() 를 쓴다.
    @param today         'YYYY-MM-DD' (KST)
-   @returns (person_key) => { 출석, 확실, 사이트수, 기준일 } | null
+   @param expectedSites ticketSitesByPerson() 결과(사람 → 수강권이 있는 사이트). 주면 그중
+                        **출석 행이 아예 없는 사이트**를 `누락사이트` 로 돌려주고 확실=false 로 한다.
+   @returns (person_key) => { 출석, 확실, 사이트수, 기준일, 누락사이트 } | null
    ---------------------------------------------------------------------- */
+
+/* 🔥 사람 → 수강권이 있는 사이트 집합.
+   실사고(2026-11-26 임동우): 출석 수는 **내일 예약이 잡힌 사이트**에서만 읽혀 왔다. 최근엔
+   청담·송파만 다니고 예전엔 옥수·광교를 다닌 회원은 옥수·광교 출석이 한 번도 읽히지 않아
+   합계에서 통째로 빠졌다(264회로 표시 · 옥수 40회권 등 6장분 누락). 같은 처지가 125명이었다.
+   "기록된 사이트를 오늘 다 읽었다" 는 확실의 근거가 못 된다 — **기록이 없는 사이트**를 알아야 한다.
+   수강권명에서 지점을 못 뽑는 행('4/14체험권')은 사이트를 모르므로 세지 않는다. */
+export function ticketSitesByPerson(memberRows, siteOfBranch, keyOf = personKey) {
+  const out = new Map();
+  for (const m of memberRows || []) {
+    const site = siteOfBranch(branchOf(m.수강권명)) || '';
+    if (!site) continue;
+    const k = keyOf(m);
+    if (!k) continue;
+    if (!out.has(k)) out.set(k, new Set());
+    out.get(k).add(site);
+  }
+  return out;
+}
+
 /** 저장된 person_key(이름⋮숫자연락처)를 현재 정규화 규칙·resolver 로 다시 만든다. */
 export function rekeyPerson(storedKey, keyOf = personKey) {
   const s = String(storedKey ?? '');
@@ -460,6 +482,7 @@ export function makeAttendanceCounter({
   siteOfBranch = () => '',
   keyOf = personKey,
   today = '',
+  expectedSites = null,
 } = {}) {
   // person → site → { 기준일, 출석수 }   (같은 사이트가 두 번 오면 최신 기준일이 이긴다)
   const byPerson = new Map();
@@ -501,13 +524,19 @@ export function makeAttendanceCounter({
       const dates = 출석행.get(`${person}\u0000${site}`) || [];
       for (const d of dates) if (d > v.기준일) 출석++;
     }
+    // 수강권은 있는데 출석 행이 아예 없는 사이트 — 그 사이트 출석이 합계에서 통째로 빠져 있다
+    const 누락사이트 = [...(expectedSites?.get(person) || [])].filter((s) => !bySite.has(s)).sort();
     return {
       출석,
-      /* 확실 = 전 사이트를 오늘 읽었다. 하나라도 옛 값이면 보정으로 메운 것이라,
-         회차처럼 **사실 단언**을 하는 자리에서는 이 플래그를 봐야 한다. */
-      확실: Boolean(today) && [...bySite.values()].every((v) => v.기준일 >= today),
+      /* 확실 = 수강권이 있는 전 사이트를 오늘 읽었다. 하나라도 옛 값이면 보정으로 메운 것이고,
+         하나라도 빠졌으면 모자란 값이라, 회차처럼 **사실 단언**을 하는 자리에서는 이 플래그를 봐야 한다. */
+      확실:
+        Boolean(today) &&
+        !누락사이트.length &&
+        [...bySite.values()].every((v) => v.기준일 >= today),
       사이트수: bySite.size,
       기준일: 가장오래된,
+      누락사이트,
     };
   };
 }

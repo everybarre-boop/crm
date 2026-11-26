@@ -10,6 +10,7 @@ import { DEFAULT_RULES, buildCrm, mergeRules, verifyMilestone } from '../../shar
 import {
   dedupeTicketRows,
   makeAttendanceCounter,
+  ticketSitesByPerson,
   makePersonResolver,
   normPersonName,
   personKey,
@@ -1138,7 +1139,7 @@ test('출석근거: 두 사이트 출석 수가 합산된다 (한쪽만 보면 �
   /* 김단하 사례 — 청담(everybarre)과 송파(everybarre-songpa)를 같이 다닌다.
      지점이 아니라 **사이트**가 단위라, 한쪽만 읽으면 회차를 절반으로 부른다. */
   const r = run({
-    memberRows: [mem()],
+    memberRows: [mem({ 수강권명: '바레 그룹 20회(청담)' }), mem({ 수강권명: '바레 그룹 10회(송파)' })],
     rosterRows: [resv()],
     attendanceRows: [
       att({ site: 'everybarre', 출석수: 36 }),
@@ -1150,6 +1151,38 @@ test('출석근거: 두 사이트 출석 수가 합산된다 (한쪽만 보면 �
   assert.ok(m, '36+13=49 → 내일 50회차인데 안 잡혔다');
   assert.equal(m.규칙키, '50');
   assert.equal(m.근거.출석사이트수, 2);
+});
+
+/* 임동우 사고(2026-11-26) — 출석 수를 **내일 예약 사이트에서만** 읽어 왔다. 예전에 다닌 사이트는
+   기록이 아예 없으니, "기록된 사이트를 오늘 다 읽었다"만 보면 모자란 값이 확실로 통과한다. */
+test('출석근거: 수강권이 있는 사이트의 출석 기록이 없으면 보류한다 (모자란 값을 단언하지 않는다)', () => {
+  const r = run({
+    memberRows: [mem({ 수강권명: '바레 그룹 20회(청담)' }), mem({ 수강권명: '바레 그룹 40회(옥수)' })],
+    rosterRows: [resv()],
+    attendanceRows: [att({ site: 'everybarre', 출석수: 49 })], // 옥수 출석이 빠진 값
+    siteOfBranch: (b) => (b === '옥수' ? 'everybarre-oksu' : 사이트(b)),
+  });
+  assert.equal(one(r, 'milestone'), undefined, '옥수 출석이 빠진 49 로 50회차를 부르면 안 된다');
+  assert.equal(r.stats.마일스톤보류, 1);
+});
+
+test('출석근거: 누락사이트 — 지점을 못 뽑는 수강권명은 사이트로 치지 않는다', () => {
+  const siteOf = (b) => ({ 옥수: 'everybarre-oksu' }[b] || 사이트(b));
+  const rows = [
+    mem({ 수강권명: '바레 그룹 20회(청담)' }),
+    mem({ 수강권명: '바레 그룹 40회(옥수)' }),
+    mem({ 수강권명: '4/14체험권' }),
+  ];
+  const cnt = makeAttendanceCounter({
+    rows: [att({ site: 'everybarre', 출석수: 10 })],
+    siteOfBranch: siteOf,
+    today: TODAY,
+    expectedSites: ticketSitesByPerson(rows, siteOf),
+  });
+  const a = cnt(PK);
+  assert.deepEqual(a.누락사이트, ['everybarre-oksu']);
+  assert.equal(a.확실, false);
+  assert.equal(a.출석, 10, '빠진 사이트를 지어내 더하지 않는다');
 });
 
 test('출석근거: 근거가 없는 회원은 마일스톤을 보내지 않는다 (지어내지 않는다)', () => {

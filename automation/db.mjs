@@ -299,6 +299,13 @@ export async function fetchAttendanceRows() {
   });
 }
 
+/** 사람별로 수강권이 있는 사이트를 뽑기 위한 members 행(attcount 계획용).
+    dedup_key 는 makePersonResolver 가 동명이인 + 연락처 빈 행을 가르는 데 필요하다. */
+export async function fetchMemberSiteRows() {
+  const sb = await getAdminClient();
+  return fetchAll(sb, T.members, 'dedup_key,이름,연락처,수강권명');
+}
+
 /* 기준일 이후 보정용 예약 행.
    ⚠️ reservations 는 하루 300~800행씩 쌓인다 — 전량 스캔 금지(CLAUDE.md).
       반드시 from 이후로 끊는다. from 이 없으면 아예 읽지 않는다. */
