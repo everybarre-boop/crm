@@ -137,24 +137,23 @@ export function personKey(rec) {
       쪼개는 기준은 dedup_key → 없으면 행 객체별 일련번호(같은 조회 안에서만 유효).
       **집계용 조회에는 되도록 dedup_key 를 select 에 포함시킬 것.**
 
-   🔥 개명·표식 변경 — 같은 연락처의 다른 이름이 **같은 등록건을 공유하면** 한 사람이다.
-      실사고(2026-11-26 손소영): 스튜디오메이트에서 '손소영M' 으로 바꾸자 다음 업로드가 전 이력을
-      새 이름으로 다시 내보냈다. dedup_key 에 이름이 있어 옛 '손소영' 행은 그대로 남고, 두 이름이
-      두 사람으로 갈려 옛 이름 쪽이 **만료 회원**으로 표시됐다(최신 수강권은 새 이름 쪽에만 있다).
-      실측 66개 연락처: 'M'·'P'·'MP'·'전액M'·'312,000M' 같은 변형은 등록건을 50~100% 공유하고,
-      가족으로 보이는 다른 이름은 대부분 0% 공유한다.
-      → 규칙: 같은 연락처 · 공유 등록건(수강권명+수강권시작일+결제일시) ≥ 1 · 적은 쪽의 절반 이상.
-        표식 목록(NAME_MARKERS)에 'M'·'P' 를 넣지 않은 건 일부러다 — 뜻을 모르는 낱글자를
-        떼면 같은 번호를 쓰는 가족이 뭉칠 수 있다. 등록건 공유는 데이터가 직접 말해 주는 근거다.
+   🔥 연락처가 같으면 **이름이 달라도 한 사람**이다(2026-11-26 관리자 결정).
+      개명·표식('손소영' → '손소영M' · 'P' · 'D' · '체험' · '8천원')·오타('박○해'/'박○혜')가
+      전부 이 경우다. 실사고(손소영): 이름이 바뀌자 옛 이름 쪽이 따로 남아 **만료 회원**으로 보였다.
+      예전엔 "등록건을 절반 이상 공유할 때만" 합쳤는데, 그래도 22개 연락처(44명)가 갈려 남았고
+      대부분 오타·표식이었다.
+      ⚠️ 대가: 한 번호를 **가족이 같이 쓰면 두 사람이 한 명으로 합쳐진다**(출석·결제 합산).
+         실측 22쌍 중 완전히 다른 이름은 14쌍 — 이 판단을 감수하고 내린 결정이다.
       대표 이름 = 가장 최근 등록건(수강권시작일 → 결제일시)을 가진 이름(= 지금 이름).
-      ⚠️ 근거는 수강권시작일이 있는 행에서만 나온다 — 회원 행을 넘기지 않는 호출부(roster·sales
-         만 넘김)는 합치지 못한다. 결제일시도 select 해야 근거가 정확하다(없으면 빈 값으로 비교).
+      등록건이 없는 이름(예약·결제 행만)은 등록건이 있는 이름에 진다.
+      ⚠️ SQL 뷰(crm_attendance_person 등)는 여전히 이름+연락처로 묶는다 — 화면·자동화가 이
+         resolver 로 다시 풀어서(rekeyPerson) 합치므로 같은 결과가 된다.
 
    사용법: const keyOf = makePersonResolver(memberRows, salesRows); keyOf(rec)
    ---------------------------------------------------------------------- */
 export function makePersonResolver(...rowSets) {
   const phonesByName = new Map();
-  const regsByPhone = new Map(); // 연락처 → 이름 → { regs: Set, latest }
+  const latestByPhone = new Map(); // 연락처 → 이름 → 가장 최근 등록건 순위('' = 등록건 없음)
   for (const rows of rowSets) {
     if (!rows) continue;
     for (const r of rows) {
@@ -166,52 +165,27 @@ export function makePersonResolver(...rowSets) {
       if (!set) phonesByName.set(name, (set = new Set()));
       set.add(ph);
 
+      let byName = latestByPhone.get(ph);
+      if (!byName) latestByPhone.set(ph, (byName = new Map()));
       const start = String(r['수강권시작일'] ?? '').trim();
-      if (!start) continue;
-      const paid = String(r['결제일시'] ?? '').trim();
-      let byName = regsByPhone.get(ph);
-      if (!byName) regsByPhone.set(ph, (byName = new Map()));
-      let e = byName.get(name);
-      if (!e) byName.set(name, (e = { regs: new Set(), latest: '' }));
-      e.regs.add(String(r['수강권명'] ?? '') + KEY_SEP + start + KEY_SEP + paid);
-      const rank = start + KEY_SEP + paid;
-      if (rank > e.latest) e.latest = rank;
+      const rank = start ? start + KEY_SEP + String(r['결제일시'] ?? '').trim() : '';
+      if (!byName.has(name) || rank > byName.get(name)) byName.set(name, rank);
     }
   }
 
-  // 연락처별로 등록건을 공유하는 이름끼리 묶고(union-find), 대표 이름을 정한다
-  const alias = new Map(); // `${이름}\0${연락처}` → 대표 이름
-  for (const [ph, byName] of regsByPhone) {
-    if (byName.size < 2) continue;
-    const names = [...byName.keys()];
-    const parent = new Map(names.map((n) => [n, n]));
-    const find = (n) => (parent.get(n) === n ? n : find(parent.get(n)));
-    for (let i = 0; i < names.length; i++) {
-      for (let j = i + 1; j < names.length; j++) {
-        const a = byName.get(names[i]).regs;
-        const b = byName.get(names[j]).regs;
-        const [small, big] = a.size <= b.size ? [a, b] : [b, a];
-        let shared = 0;
-        for (const x of small) if (big.has(x)) shared++;
-        if (shared >= 1 && shared * 2 >= small.size) parent.set(find(names[i]), find(names[j]));
-      }
-    }
-    const groups = new Map();
-    for (const n of names) {
-      const root = find(n);
-      if (!groups.has(root)) groups.set(root, []);
-      groups.get(root).push(n);
-    }
-    for (const g of groups.values()) {
-      if (g.length < 2) continue;
-      const rep = g.reduce((best, n) => {
-        const d = byName.get(n).latest.localeCompare(byName.get(best).latest);
+  // 연락처마다 대표 이름 하나 — 같은 연락처면 이름이 달라도 한 사람이다(2026-11-26 결정).
+  const repByPhone = new Map();
+  // 이름이 하나뿐인 연락처도 등록한다 — 행에 없던 이름(예약·출석 기록의 옛 이름)도 그 사람으로 간다.
+  for (const [ph, byName] of latestByPhone) {
+    repByPhone.set(
+      ph,
+      [...byName.keys()].reduce((best, n) => {
+        const d = byName.get(n).localeCompare(byName.get(best));
         return d > 0 || (d === 0 && n < best) ? n : best;
-      });
-      for (const n of g) if (n !== rep) alias.set(n + '\u0000' + ph, rep);
-    }
+      }),
+    );
   }
-  const named = (name, ph) => (alias.get(name + '\u0000' + ph) ?? name) + KEY_SEP + ph;
+  const named = (name, ph) => (repByPhone.get(ph) ?? name) + KEY_SEP + ph;
 
   // 판정 불가 행에 줄 일련번호(dedup_key 가 없을 때만). 행 객체 기준이라 같은 행을
   // 여러 번 물어봐도 같은 키가 나온다.
